@@ -17,6 +17,14 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 walkdir = "2"
 regex = "1"
 
+[dependencies.tempfile]
+version = "3"
+optional = true
+
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = "3"
+
+[[bin]]
+name = "profile_harness"
+required-features = ["tempfile"]
