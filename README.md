@@ -157,4 +157,4 @@ Per the author's request: this project cites the original design document and ad
 
 ## License
 
-MIT
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) -- same as the original Co-Wiki design document.
