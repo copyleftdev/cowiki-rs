@@ -239,6 +239,11 @@ impl WikiBackend {
         self.index.pages.is_empty()
     }
 
+    /// All pages in the wiki.
+    pub fn all_pages(&self) -> &[PageMeta] {
+        &self.index.pages
+    }
+
     /// Get a page by its ID.
     pub fn page(&self, id: &PageId) -> Option<&PageMeta> {
         self.index.id_to_idx.get(&id.0)

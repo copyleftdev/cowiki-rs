@@ -9,6 +9,7 @@ members = [
     "crates/cowiki",
     "crates/gauntlet",
     "crates/wiki-backend",
+    "crates/cowiki-server",
 ]
 
 [workspace.dependencies]
