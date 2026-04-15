@@ -130,10 +130,14 @@ pub enum Event {
 }
 
 /// Run the full simulation. Returns events one at a time via the callback.
+/// Inputs are clamped to prevent resource exhaustion.
 pub fn run_simulation<F>(n_seed_pages: usize, n_ops: usize, mut emit: F)
 where
     F: FnMut(Event),
 {
+    let n_seed_pages = n_seed_pages.clamp(5, 500);
+    let n_ops = n_ops.clamp(10, 5000);
+
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let mut rng = Rng::new(0xCAFE_BEEF);

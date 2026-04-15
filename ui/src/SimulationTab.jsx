@@ -1,5 +1,44 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { startSimulation } from './api'
+
+// ─── Fixed-size ring buffer (no allocations after init) ──────────────────────
+
+class RingBuffer {
+  constructor(capacity) {
+    this.buf = new Float64Array(capacity)
+    this.cap = capacity
+    this.len = 0
+    this.head = 0
+  }
+  push(v) {
+    this.buf[this.head] = v
+    this.head = (this.head + 1) % this.cap
+    if (this.len < this.cap) this.len++
+  }
+  toArray() {
+    if (this.len < this.cap) return Array.from(this.buf.subarray(0, this.len))
+    return [
+      ...Array.from(this.buf.subarray(this.head, this.cap)),
+      ...Array.from(this.buf.subarray(0, this.head)),
+    ]
+  }
+  max() {
+    let m = 0
+    const n = Math.min(this.len, this.cap)
+    for (let i = 0; i < n; i++) if (this.buf[i] > m) m = this.buf[i]
+    return m || 1
+  }
+  avg() {
+    if (this.len === 0) return 0
+    let s = 0
+    const n = Math.min(this.len, this.cap)
+    for (let i = 0; i < n; i++) s += this.buf[i]
+    return s / n
+  }
+  clear() { this.len = 0; this.head = 0 }
+}
+
+// ─── Pure components ─────────────────────────────────────────────────────────
 
 function Ring({ value, size = 90, label }) {
   const r = size / 2 - 6, c = 2 * Math.PI * r
@@ -36,7 +75,7 @@ function Big({ value, unit, label, color = 'var(--cyan)' }) {
 }
 
 function Sparkline({ data, max, height = 50, color = 'var(--cyan)' }) {
-  const m = max || Math.max(...data, 1)
+  const m = max || 1
   return (
     <div style={{
       height, background: 'var(--surface)', borderRadius: 6,
@@ -55,20 +94,25 @@ function Sparkline({ data, max, height = 50, color = 'var(--cyan)' }) {
   )
 }
 
+// ─── Event feed with virtualized cap ─────────────────────────────────────────
+
+const MAX_LOG_LINES = 200
+const EVENT_COLORS = { seed: 'var(--purple)', query: 'var(--cyan)', maintain: 'var(--green)', create: 'var(--amber)', done: 'var(--text)' }
+
+function fmtEvent(e) {
+  switch (e.type) {
+    case 'seed': return `seeded ${e.page_count} pages, ${e.edge_count} edges`
+    case 'query': return `"${e.query}" ${e.results}pg ${e.score.toFixed(3)} ${e.iterations}i ${e.elapsed_us}us`
+    case 'maintain': return `health=${(e.health*100).toFixed(0)}% -${e.pruned} +${e.dreamed}dream ${e.elapsed_us}us`
+    case 'create': return `${e.id} ${e.page_count}pg ${e.edge_count}edg ${e.elapsed_us}us`
+    case 'done': return `${e.total_ops}ops ${e.final_pages}pg p50=${e.query_p50_us}us p99=${e.query_p99_us}us`
+    default: return ''
+  }
+}
+
 function EventFeed({ events }) {
   const ref = useRef(null)
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [events])
-
-  const colors = { seed: 'var(--purple)', query: 'var(--cyan)', maintain: 'var(--green)', create: 'var(--amber)', done: 'var(--text)' }
-
-  const fmt = (e) => {
-    if (e.type === 'seed') return `seeded ${e.page_count} pages, ${e.edge_count} edges`
-    if (e.type === 'query') return `"${e.query}" ${e.results}pg ${e.score.toFixed(3)} ${e.iterations}i ${e.elapsed_us}us`
-    if (e.type === 'maintain') return `health=${(e.health*100).toFixed(0)}% -${e.pruned} +${e.dreamed}dream ${e.elapsed_us}us`
-    if (e.type === 'create') return `${e.id} ${e.page_count}pg ${e.edge_count}edg ${e.elapsed_us}us`
-    if (e.type === 'done') return `done: ${e.total_ops}ops ${e.final_pages}pg p50=${e.query_p50_us}us p99=${e.query_p99_us}us`
-    return ''
-  }
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [events.length])
 
   return (
     <div ref={ref} style={{
@@ -78,13 +122,20 @@ function EventFeed({ events }) {
     }}>
       {events.map((e, i) => (
         <div key={i} style={{ borderBottom: '1px solid var(--border)', padding: '1px 0' }}>
-          <span style={{ color: colors[e.type], fontWeight: 600, display: 'inline-block', width: 52 }}>{e.type.toUpperCase()}</span>
-          <span style={{ color: 'var(--text-dim)' }}>{fmt(e)}</span>
+          <span style={{ color: EVENT_COLORS[e.type], fontWeight: 600, display: 'inline-block', width: 52 }}>
+            {e.type.toUpperCase()}
+          </span>
+          <span style={{ color: 'var(--text-dim)' }}>{fmtEvent(e)}</span>
         </div>
       ))}
     </div>
   )
 }
+
+// ─── Main component ──────────────────────────────────────────────────────────
+
+const MAX_PAGES = 500
+const MAX_OPS = 5000
 
 export default function SimulationTab() {
   const [running, setRunning] = useState(false)
@@ -92,80 +143,122 @@ export default function SimulationTab() {
   const [summary, setSummary] = useState(null)
   const [pages, setPages] = useState(150)
   const [ops, setOps] = useState(500)
+  const [tick, setTick] = useState(0) // render trigger for mutable state
   const esRef = useRef(null)
 
-  // Live accumulators
-  const [live, setLive] = useState({
+  // Mutable accumulators (no React state per event)
+  const live = useRef({
     pageCount: 0, edgeCount: 0, density: 0,
-    health: 1, healthHistory: [],
-    queries: 0, queryAvg: 0, queryTotal: 0,
+    health: 1,
+    queries: 0, queryTotal: 0,
     maintains: 0, creates: 0,
     pruned: 0, dreamed: 0,
-    latencies: [], iterations: [],
-    convergenceRate: 0,
   })
+  const latBuf = useRef(new RingBuffer(120))
+  const iterBuf = useRef(new RingBuffer(120))
+  const healthBuf = useRef(new RingBuffer(50))
+  const eventBuf = useRef([])
+  const rafId = useRef(null)
+  const dirty = useRef(false)
+
+  // Batched render: flush accumulated state to React at most once per frame
+  const scheduleRender = useCallback(() => {
+    if (dirty.current) return
+    dirty.current = true
+    rafId.current = requestAnimationFrame(() => {
+      dirty.current = false
+      setEvents([...eventBuf.current])
+      setTick(t => t + 1)
+    })
+  }, [])
+
+  // Cleanup on unmount or tab switch
+  useEffect(() => {
+    return () => {
+      if (esRef.current) esRef.current.close()
+      if (rafId.current) cancelAnimationFrame(rafId.current)
+    }
+  }, [])
 
   const handleStart = () => {
+    const clampedPages = Math.min(Math.max(pages, 5), MAX_PAGES)
+    const clampedOps = Math.min(Math.max(ops, 10), MAX_OPS)
+    setPages(clampedPages)
+    setOps(clampedOps)
+
+    // Reset all mutable state
+    live.current = {
+      pageCount: 0, edgeCount: 0, density: 0, health: 1,
+      queries: 0, queryTotal: 0, maintains: 0, creates: 0,
+      pruned: 0, dreamed: 0,
+    }
+    latBuf.current.clear()
+    iterBuf.current.clear()
+    healthBuf.current.clear()
+    eventBuf.current = []
+
     setRunning(true)
     setEvents([])
     setSummary(null)
-    setLive({
-      pageCount: 0, edgeCount: 0, density: 0,
-      health: 1, healthHistory: [],
-      queries: 0, queryAvg: 0, queryTotal: 0,
-      maintains: 0, creates: 0,
-      pruned: 0, dreamed: 0,
-      latencies: [], iterations: [],
-      convergenceRate: 0,
-    })
+    setTick(0)
 
-    esRef.current = startSimulation(pages, ops, (event) => {
-      setEvents(prev => [...prev.slice(-300), event])
-
-      setLive(s => {
-        const next = { ...s }
-        if (event.type === 'seed') {
-          next.pageCount = event.page_count
-          next.edgeCount = event.edge_count
-          next.density = event.density
-        }
-        if (event.type === 'query') {
-          next.queries++
-          next.queryTotal += event.elapsed_us
-          next.queryAvg = next.queryTotal / next.queries
-          next.latencies = [...s.latencies.slice(-150), event.elapsed_us]
-          next.iterations = [...s.iterations.slice(-150), event.iterations]
-          next.convergenceRate = event.converged ? s.convergenceRate * 0.95 + 0.05 : s.convergenceRate * 0.95
-        }
-        if (event.type === 'maintain') {
-          next.maintains++
-          next.health = event.health
-          next.healthHistory = [...s.healthHistory.slice(-50), event.health]
-          next.pruned += event.pruned
-          next.dreamed += event.dreamed
-        }
-        if (event.type === 'create') {
-          next.creates++
-          next.pageCount = event.page_count
-          next.edgeCount = event.edge_count
-          if (next.pageCount > 1) next.density = next.edgeCount / (next.pageCount * (next.pageCount - 1))
-        }
-        if (event.type === 'done') {
+    esRef.current = startSimulation(clampedPages, clampedOps, (event) => {
+      // Accumulate into mutable refs (no React state update per event)
+      const L = live.current
+      switch (event.type) {
+        case 'seed':
+          L.pageCount = event.page_count
+          L.edgeCount = event.edge_count
+          L.density = event.density
+          break
+        case 'query':
+          L.queries++
+          L.queryTotal += event.elapsed_us
+          latBuf.current.push(event.elapsed_us)
+          iterBuf.current.push(event.iterations)
+          break
+        case 'maintain':
+          L.maintains++
+          L.health = event.health
+          L.pruned += event.pruned
+          L.dreamed += event.dreamed
+          healthBuf.current.push(event.health)
+          break
+        case 'create':
+          L.creates++
+          L.pageCount = event.page_count
+          L.edgeCount = event.edge_count
+          if (L.pageCount > 1) L.density = L.edgeCount / (L.pageCount * (L.pageCount - 1))
+          break
+        case 'done':
           setSummary(event)
           setRunning(false)
-        }
-        return next
-      })
+          break
+      }
+
+      // Cap the event log
+      if (eventBuf.current.length >= MAX_LOG_LINES) {
+        eventBuf.current = eventBuf.current.slice(-MAX_LOG_LINES / 2)
+      }
+      eventBuf.current.push(event)
+
+      scheduleRender()
     })
   }
 
   const handleStop = () => {
-    if (esRef.current) esRef.current.close()
+    if (esRef.current) { esRef.current.close(); esRef.current = null }
     setRunning(false)
   }
 
-  const maxLat = live.latencies.length > 0 ? Math.max(...live.latencies) : 1
-  const maxIter = live.iterations.length > 0 ? Math.max(...live.iterations) : 1
+  // Read from mutable refs for render
+  const L = live.current
+  const latData = latBuf.current.toArray()
+  const iterData = iterBuf.current.toArray()
+  const healthData = healthBuf.current.toArray()
+  const latMax = latBuf.current.max()
+  const iterMax = iterBuf.current.max()
+  const queryAvg = L.queries > 0 ? L.queryTotal / L.queries : 0
 
   const inputStyle = {
     width: 60, background: 'var(--surface-2)', border: '1px solid var(--border)',
@@ -182,16 +275,19 @@ export default function SimulationTab() {
       }}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Seed pages</span>
-          <input type="number" value={pages} onChange={e => setPages(+e.target.value)} style={inputStyle} />
+          <input type="number" value={pages} min={5} max={MAX_PAGES}
+            onChange={e => setPages(+e.target.value)} style={inputStyle} disabled={running} />
           <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Operations</span>
-          <input type="number" value={ops} onChange={e => setOps(+e.target.value)} style={inputStyle} />
+          <input type="number" value={ops} min={10} max={MAX_OPS}
+            onChange={e => setOps(+e.target.value)} style={inputStyle} disabled={running} />
+          <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>max {MAX_PAGES}pg / {MAX_OPS}ops</span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {running && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <div className="mutex-dot busy" />
-              <span style={{ fontSize: 11, color: 'var(--amber)' }}>
-                {live.queries + live.maintains + live.creates} / {ops}
+              <span style={{ fontSize: 11, color: 'var(--amber)', fontVariantNumeric: 'tabular-nums' }}>
+                {L.queries + L.maintains + L.creates} / {ops}
               </span>
             </div>
           )}
@@ -206,24 +302,23 @@ export default function SimulationTab() {
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 1, background: 'var(--border)',
       }}>
-        <Big label="Pages" value={live.pageCount} unit="" color="var(--cyan)" />
-        <Big label="Edges" value={live.edgeCount} unit="" color="var(--amber)" />
-        <Big label="Density" value={(live.density * 100).toFixed(1)} unit="%" color="var(--purple)" />
-        <Big label="Queries" value={live.queries} unit="" color="var(--green)" />
-        <Big label="Avg Latency" value={live.queryAvg.toFixed(0)} unit="us" color="var(--cyan)" />
-        <Big label="Maintains" value={live.maintains} unit="" color="var(--purple)" />
-        <Big label="Pruned" value={live.pruned} unit="" color="var(--red)" />
-        <Big label="Dreamed" value={live.dreamed} unit="" color="var(--purple)" />
+        <Big label="Pages" value={L.pageCount} unit="" color="var(--cyan)" />
+        <Big label="Edges" value={L.edgeCount} unit="" color="var(--amber)" />
+        <Big label="Density" value={(L.density * 100).toFixed(1)} unit="%" color="var(--purple)" />
+        <Big label="Queries" value={L.queries} unit="" color="var(--green)" />
+        <Big label="Avg Latency" value={queryAvg.toFixed(0)} unit="us" color="var(--cyan)" />
+        <Big label="Maintains" value={L.maintains} unit="" color="var(--purple)" />
+        <Big label="Pruned" value={L.pruned} unit="" color="var(--red)" />
+        <Big label="Dreamed" value={L.dreamed} unit="" color="var(--purple)" />
       </div>
 
       {/* ── Middle: charts + REM ─────────────────────────────── */}
       <div style={{
         display: 'grid', gridTemplateColumns: '1fr 1fr 200px', gap: 1, background: 'var(--border)', flex: '0 0 auto',
       }}>
-        {/* Latency chart */}
         <div style={{ background: 'var(--surface)', padding: 12 }}>
           <div className="panel-title">Query Latency</div>
-          <Sparkline data={live.latencies.slice(-120)} max={maxLat} height={70} color="var(--cyan)" />
+          <Sparkline data={latData} max={latMax} height={70} color="var(--cyan)" />
           {summary && (
             <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>
               <span>p50 <strong style={{ color: 'var(--green)' }}>{summary.query_p50_us}us</strong></span>
@@ -234,34 +329,39 @@ export default function SimulationTab() {
           )}
         </div>
 
-        {/* Convergence chart */}
         <div style={{ background: 'var(--surface)', padding: 12 }}>
           <div className="panel-title">Convergence (iterations per query)</div>
-          <Sparkline data={live.iterations.slice(-120)} max={maxIter} height={70} color="var(--green)" />
-          {live.iterations.length > 0 && (
+          <Sparkline data={iterData} max={iterMax} height={70} color="var(--green)" />
+          {iterData.length > 0 && (
             <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11 }}>
-              <span>avg <strong style={{ color: 'var(--green)' }}>
-                {(live.iterations.reduce((a,b)=>a+b,0)/live.iterations.length).toFixed(1)}
-              </strong> iter</span>
-              <span>max <strong style={{ color: 'var(--amber)' }}>{Math.max(...live.iterations)}</strong></span>
+              <span>avg <strong style={{ color: 'var(--green)' }}>{iterBuf.current.avg().toFixed(1)}</strong> iter</span>
+              <span>max <strong style={{ color: 'var(--amber)' }}>{iterBuf.current.max()}</strong></span>
             </div>
           )}
         </div>
 
-        {/* REM Agent */}
         <div style={{ background: 'var(--surface)', padding: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-          <Ring value={live.health} size={80} label="Graph Health" />
-          {live.healthHistory.length > 1 && (
+          <Ring value={L.health} size={80} label="Graph Health" />
+          {healthData.length > 1 && (
             <div style={{ width: '100%', marginTop: 8 }}>
-              <Sparkline data={live.healthHistory} max={1} height={24} color="var(--green)" />
+              <Sparkline data={healthData} max={1} height={24} color="var(--green)" />
             </div>
           )}
         </div>
       </div>
 
       {/* ── Bottom: event feed ───────────────────────────────── */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0 0 0 0' }}>
-        <EventFeed events={events} />
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {events.length === 0 && !running ? (
+          <div style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--text-dim)', fontSize: 13, background: 'var(--surface)',
+          }}>
+            Hit "Run Simulation" to generate an ephemeral wiki and stress the full stack
+          </div>
+        ) : (
+          <EventFeed events={events} />
+        )}
       </div>
     </div>
   )
