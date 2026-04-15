@@ -137,15 +137,22 @@ cargo clippy --workspace --all-targets
 
 ## Status
 
-These crates are the verified mathematical engine. To build a full Co-Wiki from them, you still need:
+The mathematical engine and wiki backend are complete and tested:
 
-- A wiki backend (DokuWiki flat files, or similar) with filesystem integration
-- Initial activation from query metadata (the `a^0` ignition function)
-- Content similarity oracle for the dream operator
-- A UI for human co-authorship, editing, and approval workflows
+- Spreading activation with proven convergence (Banach contraction)
+- Greedy retrieval with proven >= 1/2 optimality bound
+- REM Agent (decay, prune, dream) with proven health stability
+- Wiki filesystem backend: scan, parse `[[backlinks]]`, build graph
+- TF-IDF query ignition and content similarity oracle
+- Hybrid persistence: human-readable `.meta` files + SQLite engine
+- Page creation, editing, and backlink insertion
+- Profiled and optimized (callgrind/cachegrind/massif): 436us/query, 12ms save/reload
+
+To build a full Co-Wiki product from this engine, you still need:
+
+- A UI for wiki reading, editing, browsing, and approval workflows
 - Chat session harvest: extracting wiki-worthy content from LLM conversations
-
-The primitives are ready. The integration is the next step.
+- Write-path concurrency (file locking for multi-page atomic operations)
 
 ## Citation
 
