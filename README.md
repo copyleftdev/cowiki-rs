@@ -1,6 +1,6 @@
 # cowiki-rs
 
-Formally verified primitives for the [Co-Wiki and REM Agent](https://github.com/pshomo/co-wiki) architecture proposed by [Paul Shomo](https://www.linkedin.com/in/paulshomo/).
+Formally verified primitives for the Co-Wiki and REM Agent architecture proposed by [Paul Shomo](https://www.linkedin.com/in/paulshomo/) ([@ShomoBits](https://x.com/ShomoBits)).
 
 Shomo's design describes a wiki-based warm storage layer for LLM memory -- human-readable, co-authored by humans and agents, maintained by a background "REM Agent" that prunes, decays, and discovers new connections. He published the design as an open invitation to build.
 
