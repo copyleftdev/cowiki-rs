@@ -17,9 +17,11 @@
 //! ```
 
 pub mod graph;
+pub mod meta;
 pub mod parse;
 pub mod persist;
 pub mod scan;
+pub mod store;
 pub mod tfidf;
 pub mod types;
 pub mod write;

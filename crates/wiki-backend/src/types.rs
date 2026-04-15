@@ -107,3 +107,9 @@ impl From<std::io::Error> for WikiError {
         WikiError::Io(e)
     }
 }
+
+impl From<rusqlite::Error> for WikiError {
+    fn from(e: rusqlite::Error) -> Self {
+        WikiError::SerdeError(format!("SQLite error: {e}"))
+    }
+}

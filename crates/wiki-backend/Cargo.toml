@@ -13,6 +13,7 @@ chunk-quality = { path = "../chunk-quality" }
 cowiki = { path = "../cowiki" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
 walkdir = "2"
 regex = "1"
 
