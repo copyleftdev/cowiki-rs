@@ -1,9 +1,11 @@
 const API = 'http://localhost:3001/api'
 
-export const listPages = () => fetch(`${API}/pages`).then(r => r.json())
-export const getPage = id => fetch(`${API}/pages/${id}`).then(r => r.ok ? r.json() : null)
-export const getStats = () => fetch(`${API}/stats`).then(r => r.json())
-export const getPerf = () => fetch(`${API}/perf`).then(r => r.json())
+const safe = (promise, fallback) => promise.catch(() => fallback)
+
+export const listPages = () => safe(fetch(`${API}/pages`).then(r => r.json()), [])
+export const getPage = id => safe(fetch(`${API}/pages/${id}`).then(r => r.ok ? r.json() : null), null)
+export const getStats = () => safe(fetch(`${API}/stats`).then(r => r.json()), null)
+export const getPerf = () => safe(fetch(`${API}/perf`).then(r => r.json()), null)
 
 export const queryPages = (query, budget = 4000) =>
   fetch(`${API}/query`, {
