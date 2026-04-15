@@ -205,7 +205,10 @@ async fn get_page(
 ) -> Result<Json<PageDetail>, StatusCode> {
     let wiki = acquire_wiki(&state);
     let meta = wiki.page(&PageId(id)).ok_or(StatusCode::NOT_FOUND)?;
-    let content = std::fs::read_to_string(&meta.path).unwrap_or_default();
+
+    // Resolve relative path through wiki root.
+    let content = std::fs::read_to_string(wiki.root().join(&meta.path))
+        .unwrap_or_default();
 
     Ok(Json(PageDetail {
         id: meta.id.0.clone(),

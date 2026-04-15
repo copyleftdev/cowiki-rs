@@ -50,9 +50,9 @@ impl WikiBackend {
         let pages = scan::scan_directory(&root)?;
         let id_to_idx = scan::build_index_map(&pages);
 
-        // Read all page contents for TF-IDF.
+        // Read all page contents for TF-IDF (resolve relative paths through root).
         let contents: Vec<String> = pages.iter()
-            .map(|p| fs::read_to_string(&p.path).unwrap_or_default())
+            .map(|p| fs::read_to_string(root.join(&p.path)).unwrap_or_default())
             .collect();
 
         let tfidf = tfidf::build_index(&contents);
@@ -248,6 +248,11 @@ impl WikiBackend {
     pub fn page(&self, id: &PageId) -> Option<&PageMeta> {
         self.index.id_to_idx.get(&id.0)
             .and_then(|&idx| self.index.pages.get(idx))
+    }
+
+    /// Wiki root directory.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Get the underlying graph.

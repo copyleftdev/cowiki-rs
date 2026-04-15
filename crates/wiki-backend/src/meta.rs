@@ -16,8 +16,8 @@ use std::path::Path;
 use crate::types::{PageMeta, WikiError};
 
 /// Write a companion `.meta` file for a page.
-pub fn write_meta(page: &PageMeta) -> Result<(), WikiError> {
-    let meta_path = page.path.with_extension("meta");
+pub fn write_meta(page: &PageMeta, root: &Path) -> Result<(), WikiError> {
+    let meta_path = root.join(&page.path).with_extension("meta");
 
     let links: String = if page.links_to.is_empty() {
         "  (none)".to_string()
@@ -45,9 +45,9 @@ pub fn write_meta(page: &PageMeta) -> Result<(), WikiError> {
 }
 
 /// Write `.meta` files for all pages.
-pub fn write_all_meta(pages: &[PageMeta]) -> Result<(), WikiError> {
+pub fn write_all_meta(pages: &[PageMeta], root: &Path) -> Result<(), WikiError> {
     for page in pages {
-        write_meta(page)?;
+        write_meta(page, root)?;
     }
     Ok(())
 }
@@ -77,14 +77,14 @@ mod tests {
 
         let page = PageMeta {
             id: PageId("test".into()),
-            path: md_path.clone(),
+            path: std::path::PathBuf::from("test.md"),
             title: "Test Page".into(),
             links_to: vec![PageId("other".into()), PageId("another".into())],
             token_cost: 42,
             category: 1,
         };
 
-        write_meta(&page).unwrap();
+        write_meta(&page, tmp.path()).unwrap();
 
         let meta = read_meta(&md_path).unwrap().unwrap();
         assert!(meta.contains("title: Test Page"));
@@ -101,14 +101,14 @@ mod tests {
 
         let page = PageMeta {
             id: PageId("lonely".into()),
-            path: md_path.clone(),
+            path: std::path::PathBuf::from("lonely.md"),
             title: "Lonely".into(),
             links_to: vec![],
             token_cost: 10,
             category: 0,
         };
 
-        write_meta(&page).unwrap();
+        write_meta(&page, tmp.path()).unwrap();
 
         let meta = read_meta(&md_path).unwrap().unwrap();
         assert!(meta.contains("(none)"));

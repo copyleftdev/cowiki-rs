@@ -16,7 +16,7 @@ use crate::types::*;
 /// Save the full wiki state: `.meta` files for humans, SQLite for the engine.
 pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
     // 1. Write companion .meta files (legible layer).
-    meta::write_all_meta(&index.pages)?;
+    meta::write_all_meta(&index.pages, wiki_root)?;
 
     // 2. Write SQLite (engine layer) — single transaction for all writes.
     let mut conn = store::open_db(wiki_root)?;

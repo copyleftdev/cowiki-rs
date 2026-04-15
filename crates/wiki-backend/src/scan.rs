@@ -73,7 +73,7 @@ pub fn scan_directory(root: &Path) -> Result<Vec<PageMeta>, WikiError> {
 
         pages.push(PageMeta {
             id: page_id,
-            path: path.to_path_buf(),
+            path: rel_path.to_path_buf(),
             title,
             links_to,
             token_cost,
