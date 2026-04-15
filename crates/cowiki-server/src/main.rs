@@ -386,7 +386,7 @@ async fn main() {
         counters: Counters::new(),
     });
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/pages", get(list_pages).post(create_page_handler))
         .route("/api/pages/{*id}", get(get_page))
         .route("/api/query", post(query_pages))
@@ -397,8 +397,27 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
+    // Serve static UI files if --ui <path> is provided.
+    let ui_dir = std::env::args().nth(2).and_then(|flag| {
+        if flag == "--ui" { std::env::args().nth(3) } else { None }
+    });
+    if let Some(ref dir) = ui_dir {
+        eprintln!("Serving UI from: {dir}");
+        app = app.fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .fallback(tower_http::services::ServeFile::new(
+                    PathBuf::from(dir).join("index.html"),
+                )),
+        );
+    }
+
     let addr = "0.0.0.0:3001";
-    eprintln!("API ready at http://{addr}");
+    if ui_dir.is_some() {
+        eprintln!("Co-Wiki ready at http://{addr}");
+    } else {
+        eprintln!("API ready at http://{addr}");
+        eprintln!("  (add --ui <path> to serve the frontend)");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

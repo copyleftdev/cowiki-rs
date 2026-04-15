@@ -22,10 +22,10 @@ pub fn build_graph(pages: &[PageMeta], id_to_idx: &HashMap<String, usize>) -> Sc
 
     for (i, page) in pages.iter().enumerate() {
         for link in &page.links_to {
-            if let Some(&j) = id_to_idx.get(&link.0)
-                && i != j
-            {
-                weights[i * n + j] = 1.0;
+            if let Some(&j) = id_to_idx.get(&link.0) {
+                if i != j {
+                    weights[i * n + j] = 1.0;
+                }
             }
             // Dangling links silently skipped.
         }

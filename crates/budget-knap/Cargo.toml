@@ -1,7 +1,7 @@
 [package]
 name = "budget-knap"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "Budget-constrained selection with >= 1/2 OPT guarantee"
 
 [dependencies]
