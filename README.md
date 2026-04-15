@@ -1,16 +1,26 @@
 # cowiki-rs
 
-Formally verified primitives for the [Co-Wiki and REM Agent](https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424) architecture proposed by [Paul Shomo](https://www.linkedin.com/in/paulshomo/) ([@ShomoBits](https://x.com/ShomoBits)).
+Formally verified spreading activation engine for the [Co-Wiki and REM Agent](https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424) architecture proposed by [Paul Shomo](https://www.linkedin.com/in/paulshomo/) ([@ShomoBits](https://x.com/ShomoBits)).
 
-Shomo's design describes a wiki-based warm storage layer for LLM memory -- human-readable, co-authored by humans and agents, maintained by a background "REM Agent" that prunes, decays, and discovers new connections. He published the design as an open invitation to build.
+## Try it
 
-This repository answers that invitation with the mathematical engine: formalized spreading activation retrieval, proven convergence guarantees, and five independent Rust crates ready to underpin a full Co-Wiki implementation.
+```bash
+git clone https://github.com/copyleftdev/cowiki-rs
+cd cowiki-rs
+make demo
+```
+
+Browser opens. 20-page wiki, 92 backlink edges, spreading activation retrieval, performance counters, stress testing, REM agent with dream-discovered backlinks. All real, no mocks.
+
+Query "memory sleep consolidation" and watch activation spread from memory-consolidation through backlinks into priming, REM agent, chunking, and Thinking Fast and Slow. 68 microseconds. Vector search finds one page. Spreading activation finds seven.
+
+`make demo-stop` to shut down. Requires Docker.
 
 ## What this is
 
-The Co-Wiki's core claim is that **graph-based spreading activation over a backlink-rich knowledge graph outperforms flat vector similarity search for associative retrieval** -- the kind of retrieval where the answer is 2-3 hops away, not semantically similar.
+Shomo proposed a wiki-based warm storage layer for LLM memory where retrieval happens through **graph-based spreading activation** instead of flat vector search. He published the design as an open invitation to build.
 
-We formalized that claim, subjected it to adversarial property-based testing, and built production-grade primitives from the results.
+We formalized the math, proved it works, found three corrections, built Rust crates from the verified contracts, wired them to a real wiki filesystem, added a performance dashboard, and Dockerized the whole thing.
 
 ### What was proven
 
@@ -26,133 +36,107 @@ We formalized that claim, subjected it to adversarial property-based testing, an
 | 8 | Hard threshold breaks contraction (causes limit cycles) | **Disproven and corrected** |
 | 9 | Monotonic hop-decay on general graphs | **Disproven and corrected** |
 
-Findings 8 and 9 are improvements to the original formulation. The sigmoid threshold fix restores all convergence guarantees. See [`PROOF.md`](PROOF.md) for the full verification report.
+Findings 8 and 9 are corrections that improved the model. The sigmoid threshold fix restores all guarantees. See [`PROOF.md`](PROOF.md) for the full verification report.
 
 ## Architecture
 
 ```
 cowiki-rs/
-  PROOF.md              Formal verification report (17 claims, 3 corrections)
-  proof/                Python hypothesis suite (37 property tests)
-    cowiki/             Formalized model: graph, activation, retrieval, REM
-    tests/              Property-based tests that discovered the corrections
-  crates/               Rust workspace (76 tests, 0 unsafe)
-    scored-graph/       Weighted directed graph with row-stochastic invariant
-    spread/             Spreading activation with pluggable threshold functions
-    budget-knap/        Budget-constrained selection (>= 1/2 OPT guarantee)
-    temporal-graph/     REM Agent operators: decay, prune, dream
-    chunk-quality/      Coherence, recall, density metrics
-    cowiki/             Composition layer (thin glue)
-    gauntlet/           VOPR-style adversarial test suite (41 chaos tests)
+  PROOF.md                Formal verification report (17 claims, 3 corrections)
+  proof/                  Python hypothesis suite (37 property tests)
+  demo-wiki/              20 interconnected pages across 5 topic clusters
+  ui/                     React dashboard (Vite)
+  Dockerfile + Makefile   One-command demo
+  crates/
+    scored-graph/         Weighted directed graph, row-stochastic invariant
+    spread/               Spreading activation, pluggable thresholds
+    budget-knap/          Budget-constrained selection, >= 1/2 OPT guarantee
+    temporal-graph/       REM Agent: decay, prune, dream
+    chunk-quality/        Coherence, recall, density metrics
+    cowiki/               Composition layer
+    gauntlet/             VOPR adversarial chaos suite (41 tests)
+    wiki-backend/         Filesystem scan, TF-IDF, SQLite + .meta persistence
+    cowiki-server/        Axum HTTP API + static UI serving
 ```
 
-### Why separate crates
-
-Each primitive has **independent mathematical contracts** and **users beyond the Co-Wiki**:
-
-- `spread` -- any graph propagation: recommendation engines, knowledge graphs, social networks.
-- `budget-knap` -- any constrained selection: token budgets, memory limits, API rate caps.
-- `temporal-graph` -- any graph with decay: cache eviction, freshness, social network aging.
-- `chunk-quality` -- any chunking evaluation: RAG tuning, document segmentation.
-- `scored-graph` -- any weighted directed graph with per-node costs.
-
-The proofs told us where the seams are. If the contracts are independent, the implementations should be independent.
-
-### How they compose
-
-```rust
-use cowiki::{retrieve, maintain, ScoredGraph, SpreadConfig, TemporalState, RemConfig};
-
-// Build a wiki graph from articles and backlinks.
-let graph = ScoredGraph::new(n, weights, token_costs);
-
-// Retrieve: query -> spread activation -> budget-constrained selection.
-let (selection, activation) = retrieve(&graph, &initial_activation, budget, &SpreadConfig::default());
-
-// Maintain: REM cycle -- decay stale edges, prune dormant articles, discover backlinks.
-let report = maintain(&mut graph, &mut state, &query, &RemConfig::default());
-```
-
-## Formal notation
-
-The Co-Wiki knowledge graph:
+### How it works
 
 ```
-G = (V, E, w, tau)
-
-V   = wiki articles
-E   = directed backlinks and category edges
-w   = edge weight (association strength), row-stochastic
-tau = token cost per article (variable -- human-cognitive chunking)
+wiki directory           wiki-backend              cowiki primitives
+*.md files     --scan-->  PageMeta[]     --build-->  ScoredGraph
+[[backlinks]]             TfIdfIndex                 spread(a0)
+directories               id_to_idx                  select(budget)
+               <--write-- create_page()  <--------   rem_cycle()
+.cowiki/                   persist()                  dream_candidates()
+  engine.db   (SQLite, computational state)
+  *.meta      (human-readable, cat-able)
 ```
 
-Spreading activation (linear operator, provably contracting):
+### The demo UI
 
-```
-T(a) = (1 - d) * a^0  +  d * W^T * a
+Three-panel dashboard. Left: query with example pills + page list. Center: page viewer with clickable backlink pills. Right: live performance counters, stress test (fires 200 queries, shows p50/p95/p99 latency bars), REM agent controls with health ring gauge and dream-discovered backlinks.
 
-Contraction:  ||T(a) - T(b)||_1  <=  d * ||a - b||_1
-Convergence:  O(log(1/eps) / log(1/d)) iterations
-Bound:        0  <=  a*  <=  max(a^0) / (1 - d)
-```
+Kinetic mutex indicator in the header: pulsing green when idle, glowing amber when locked. Lock-wait time measured in nanoseconds.
 
-Retrieval (0-1 knapsack with >= 1/2 optimality guarantee):
+## Performance
 
-```
-R*(q, G, B) = argmax_{S, sum tau(v) <= B}  sum a*(v)
-```
+Profiled with Valgrind callgrind (25B instructions), cachegrind, and massif. Three optimization passes driven by the profiling data.
 
-REM Agent (temporal graph dynamics):
-
-```
-Decay:   w_t(i,j) = w_0(i,j) * exp(-lambda * (t - t_last(i)))
-Prune:   remove v if max activation over window < theta
-Dream:   add (u,v) if similarity(u,v) > theta and (u,v) not in E
-```
+| Metric | Value |
+|---|---|
+| Query latency (p50) | 27 us |
+| Throughput | 36,400 qps |
+| Save/reload | 12 ms |
+| REM + dream cycle | 2.6 ms |
 
 ## Test suite
 
-**76 tests, 0 failures, 0 clippy warnings, 0 unsafe.**
+**133 tests, 0 failures, 0 clippy warnings, 0 unsafe.**
 
 | Layer | Tests | What it covers |
 |---|---|---|
-| **proptest** (property-based) | 22 | Contraction, convergence, bounds, knapsack guarantee, decay formula, coherence |
-| **unit tests** | 13 | Basic construction, edge cases, end-to-end pipeline |
-| **gauntlet** (adversarial) | 41 | VOPR chaos, pathological topologies, IEEE 754 torture, long-horizon stability, worst-case knapsack |
+| proptest (property-based) | 22 | Contraction, convergence, bounds, knapsack, decay, coherence |
+| Unit tests | 61 | Construction, edge cases, scan, parse, TF-IDF, persistence, pipeline |
+| Gauntlet (adversarial) | 41 | VOPR chaos, pathological topologies, IEEE 754 torture, worst-case knapsack |
+| Backend VOPR (end-to-end) | 9 | Filesystem chaos: create/edit/query/maintain/save/reload/external deletion |
 
-The gauntlet runs ~22,500 chaos operations: weight corruption, topology mutations, 500-cycle REM simulations, machine-epsilon weights, near-overflow normalization, barbell bottlenecks, complete graphs at d=0.99 -- checking every proven invariant after every step. Seeded PRNG makes every failure reproducible.
+The gauntlet runs ~22,500 chaos operations checking every proven invariant after every step. The backend VOPR drives the full vertical (filesystem through SQLite through spreading activation) under random operations for 500+ steps per seed.
 
-## Running
+## Running without Docker
 
 ```bash
-# Full test suite
-cargo test
+# Terminal 1: API server
+cargo build --release -p cowiki-server
+./target/release/cowiki-server demo-wiki
 
-# Just the adversarial gauntlet
-cargo test -p gauntlet
+# Terminal 2: UI dev server (with hot reload)
+cd ui && npm install && npx vite
 
-# Clippy lint sweep
-cargo clippy --workspace --all-targets
+# Or serve the built UI from the server itself:
+cd ui && npm install && npx vite build
+./target/release/cowiki-server demo-wiki --ui ui/dist
 ```
 
-## Status
+```bash
+# Run all tests
+cargo test
 
-The mathematical engine and wiki backend are complete and tested:
+# Run the Python proof suite
+cd proof && pip install -r requirements.txt && python -m pytest tests/ -v
+```
 
-- Spreading activation with proven convergence (Banach contraction)
-- Greedy retrieval with proven >= 1/2 optimality bound
-- REM Agent (decay, prune, dream) with proven health stability
-- Wiki filesystem backend: scan, parse `[[backlinks]]`, build graph
-- TF-IDF query ignition and content similarity oracle
-- Hybrid persistence: human-readable `.meta` files + SQLite engine
-- Page creation, editing, and backlink insertion
-- Profiled and optimized (callgrind/cachegrind/massif): 436us/query, 12ms save/reload
+## Demo wiki
 
-To build a full Co-Wiki product from this engine, you still need:
+20 pages across 5 topic clusters with organic cross-domain backlinks:
 
-- A UI for wiki reading, editing, browsing, and approval workflows
-- Chat session harvest: extracting wiki-worthy content from LLM conversations
-- Write-path concurrency (file locking for multi-page atomic operations)
+- **cognitive/** chunking, memory-consolidation, priming, spreading-activation
+- **security/** attack-surface-mapping, threat-modeling, supply-chain, sbom-analysis
+- **distributed/** eventual-consistency, consensus-protocols, fault-injection
+- **ai/** spreading-activation (formal), knapsack-retrieval, transformers, attention
+- **projects/** threat-model-review
+- **reading-notes/** Designing Data-Intensive Applications, Thinking Fast and Slow
+
+The cross-domain links are what make spreading activation shine. A query about "memory" reaches security pages through the shared concept of graph traversal. A query about "trust" reaches cognitive science through consensus protocols.
 
 ## Citation
 
@@ -164,4 +148,4 @@ Per the author's request: this project cites the original design document and ad
 
 ## License
 
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) -- same as the original Co-Wiki design document.
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
