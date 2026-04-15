@@ -18,13 +18,14 @@ pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
     // 1. Write companion .meta files (legible layer).
     meta::write_all_meta(&index.pages)?;
 
-    // 2. Write SQLite (engine layer).
-    let conn = store::open_db(wiki_root)?;
+    // 2. Write SQLite (engine layer) — single transaction for all writes.
+    let mut conn = store::open_db(wiki_root)?;
     let n = index.pages.len();
 
-    store::save_graph(&conn, n, &index.raw_weights, &index.costs)?;
-    store::save_tfidf(&conn, &index.df, &index.tfidf_vectors)?;
-    store::save_temporal(&conn, &index.temporal_state)?;
+    let tx = conn.transaction()?;
+    store::save_graph(&tx, n, &index.raw_weights, &index.costs)?;
+    store::save_tfidf(&tx, &index.df, &index.tfidf_vectors)?;
+    store::save_temporal(&tx, &index.temporal_state)?;
 
     // 3. Save page list as JSON in the meta table (small, structured).
     let pages_json = serde_json::to_string(&index.pages)
@@ -32,14 +33,15 @@ pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
     let idx_json = serde_json::to_string(&index.id_to_idx)
         .map_err(|e| WikiError::SerdeError(e.to_string()))?;
 
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('pages', ?1)",
         rusqlite::params![pages_json],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('id_to_idx', ?1)",
         rusqlite::params![idx_json],
     )?;
+    tx.commit()?;
 
     Ok(())
 }

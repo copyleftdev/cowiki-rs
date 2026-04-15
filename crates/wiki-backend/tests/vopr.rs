@@ -134,7 +134,7 @@ fn check_invariants(wiki: &WikiBackend, label: &str) -> Result<(), String> {
     let g = wiki.graph();
 
     // 1. Row-stochastic.
-    if g.len() > 0 && !g.is_row_stochastic() {
+    if !g.is_empty() && !g.is_row_stochastic() {
         return Err(format!("[{label}] Row-stochastic invariant violated"));
     }
 

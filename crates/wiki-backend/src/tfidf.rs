@@ -1,24 +1,30 @@
 use std::collections::HashMap;
 
 /// A TF-IDF index over wiki pages.
+///
+/// Dense vectors and norms are precomputed at build time so that
+/// `ignite` and `similarity` never allocate or hash.
 #[derive(Debug, Clone)]
 pub struct TfIdfIndex {
-    /// Number of documents.
     pub n_docs: usize,
     /// Document frequency: how many documents contain each term.
     pub df: HashMap<String, usize>,
-    /// TF-IDF vector per document (sparse).
+    /// TF-IDF vector per document (sparse, kept for persistence).
     pub vectors: Vec<HashMap<String, f64>>,
+    /// Precomputed dense vectors (one per doc, shared vocabulary).
+    dense: Vec<Vec<f64>>,
+    /// Precomputed L2 norms (one per doc).
+    norms: Vec<f64>,
+    /// Vocabulary index for sparse→dense conversion of queries.
     vocab_idx: HashMap<String, usize>,
 }
 
 impl TfIdfIndex {
-    /// Serializable components for persistence.
     pub fn df(&self) -> &HashMap<String, usize> {
         &self.df
     }
 
-    pub fn vectors(&self) -> &Vec<HashMap<String, f64>> {
+    pub fn vectors(&self) -> &[HashMap<String, f64>] {
         &self.vectors
     }
 
@@ -28,16 +34,10 @@ impl TfIdfIndex {
         df: HashMap<String, usize>,
         vectors: Vec<HashMap<String, f64>>,
     ) -> Self {
-        let vocab: Vec<String> = {
-            let mut v: Vec<String> = df.keys().cloned().collect();
-            v.sort();
-            v
-        };
-        let vocab_idx: HashMap<String, usize> = vocab.iter()
-            .enumerate()
-            .map(|(i, t)| (t.clone(), i))
-            .collect();
-        Self { n_docs, df, vectors, vocab_idx }
+        let vocab_idx = build_vocab_idx(&df);
+        let dense = precompute_dense(&vectors, &vocab_idx);
+        let norms = precompute_norms(&dense);
+        Self { n_docs, df, vectors, dense, norms, vocab_idx }
     }
 }
 
@@ -60,7 +60,7 @@ pub fn build_index(contents: &[String]) -> TfIdfIndex {
         tf_per_doc.push(tf);
     }
 
-    // Compute TF-IDF vectors.
+    // Compute sparse TF-IDF vectors.
     let vectors: Vec<HashMap<String, f64>> = tf_per_doc.iter().map(|tf| {
         let max_tf = tf.values().copied().max().unwrap_or(1) as f64;
         tf.iter().map(|(term, &count)| {
@@ -70,57 +70,70 @@ pub fn build_index(contents: &[String]) -> TfIdfIndex {
         }).collect()
     }).collect();
 
-    // Build vocabulary.
-    let mut vocab: Vec<String> = df.keys().cloned().collect();
-    vocab.sort();
-    let vocab_idx: HashMap<String, usize> = vocab.iter()
-        .enumerate()
-        .map(|(i, t)| (t.clone(), i))
-        .collect();
+    // Precompute dense vectors and norms once.
+    let vocab_idx = build_vocab_idx(&df);
+    let dense = precompute_dense(&vectors, &vocab_idx);
+    let norms = precompute_norms(&dense);
 
-    TfIdfIndex { n_docs, df, vectors, vocab_idx }
+    TfIdfIndex { n_docs, df, vectors, dense, norms, vocab_idx }
 }
 
 /// Compute initial activation `a⁰` from a text query.
 ///
-/// Returns a `Vec<f64>` of length `n` where each entry is the cosine
-/// similarity between the query's TF-IDF vector and the page's.
+/// Uses precomputed dense vectors and norms — no per-query allocation
+/// for document vectors, no HashMap lookups during the hot loop.
 pub fn ignite(index: &TfIdfIndex, query: &str) -> Vec<f64> {
     let query_tf = query_tfidf(index, query);
-    let query_dense = to_dense(&query_tf, &index.vocab_idx);
+    let query_dense = sparse_to_dense(&query_tf, &index.vocab_idx);
     let query_norm = l2_norm(&query_dense);
 
     if query_norm == 0.0 {
         return vec![0.0; index.n_docs];
     }
 
-    index.vectors.iter().map(|doc_sparse| {
-        let doc_dense = to_dense(doc_sparse, &index.vocab_idx);
-        let doc_norm = l2_norm(&doc_dense);
+    // Hot loop: dot product against precomputed dense vectors.
+    index.dense.iter().zip(index.norms.iter()).map(|(doc, &doc_norm)| {
         if doc_norm == 0.0 {
             0.0
         } else {
-            dot(&query_dense, &doc_dense) / (query_norm * doc_norm)
+            dot(&query_dense, doc) / (query_norm * doc_norm)
         }
     }).collect()
 }
 
-/// Content similarity oracle for the dream operator.
+/// Content similarity between pages `i` and `j`.
 ///
-/// Returns the cosine similarity between pages `i` and `j`.
+/// Uses precomputed dense vectors and norms — O(vocab_size) with
+/// no allocation, no hashing.
 pub fn similarity(index: &TfIdfIndex, i: usize, j: usize) -> f64 {
-    if i >= index.vectors.len() || j >= index.vectors.len() {
+    if i >= index.n_docs || j >= index.n_docs {
         return 0.0;
     }
-    let a = to_dense(&index.vectors[i], &index.vocab_idx);
-    let b = to_dense(&index.vectors[j], &index.vocab_idx);
-    let norm_a = l2_norm(&a);
-    let norm_b = l2_norm(&b);
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot(&a, &b) / (norm_a * norm_b)
+    let norm_i = index.norms[i];
+    let norm_j = index.norms[j];
+    if norm_i == 0.0 || norm_j == 0.0 {
+        return 0.0;
     }
+    dot(&index.dense[i], &index.dense[j]) / (norm_i * norm_j)
+}
+
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+fn build_vocab_idx(df: &HashMap<String, usize>) -> HashMap<String, usize> {
+    let mut vocab: Vec<&String> = df.keys().collect();
+    vocab.sort();
+    vocab.into_iter().enumerate().map(|(i, t)| (t.clone(), i)).collect()
+}
+
+fn precompute_dense(
+    vectors: &[HashMap<String, f64>],
+    vocab_idx: &HashMap<String, usize>,
+) -> Vec<Vec<f64>> {
+    vectors.iter().map(|sparse| sparse_to_dense(sparse, vocab_idx)).collect()
+}
+
+fn precompute_norms(dense: &[Vec<f64>]) -> Vec<f64> {
+    dense.iter().map(|v| l2_norm(v)).collect()
 }
 
 fn query_tfidf(index: &TfIdfIndex, query: &str) -> HashMap<String, f64> {
@@ -140,7 +153,7 @@ fn query_tfidf(index: &TfIdfIndex, query: &str) -> HashMap<String, f64> {
         .collect()
 }
 
-fn to_dense(sparse: &HashMap<String, f64>, vocab_idx: &HashMap<String, usize>) -> Vec<f64> {
+fn sparse_to_dense(sparse: &HashMap<String, f64>, vocab_idx: &HashMap<String, usize>) -> Vec<f64> {
     let n = vocab_idx.len();
     let mut dense = vec![0.0; n];
     for (term, &value) in sparse {
@@ -180,10 +193,10 @@ mod tests {
 
         let index = build_index(&contents);
         assert_eq!(index.n_docs, 3);
+        assert_eq!(index.dense.len(), 3);
+        assert_eq!(index.norms.len(), 3);
 
         let a0 = ignite(&index, "transformers attention");
-
-        // Pages 0 and 2 mention both terms, page 1 does not.
         assert!(a0[0] > a0[1], "Transformers page should rank above forests");
         assert!(a0[2] > a0[1], "Attention page should rank above forests");
     }
@@ -196,7 +209,7 @@ mod tests {
         ];
         let index = build_index(&contents);
         let sim = similarity(&index, 0, 1);
-        assert!((sim - 1.0).abs() < 1e-9, "Identical docs should have similarity 1.0, got {sim}");
+        assert!((sim - 1.0).abs() < 1e-9, "Identical docs: got {sim}");
     }
 
     #[test]
@@ -207,7 +220,7 @@ mod tests {
         ];
         let index = build_index(&contents);
         let sim = similarity(&index, 0, 1);
-        assert!(sim.abs() < 1e-9, "Disjoint docs should have similarity ~0, got {sim}");
+        assert!(sim.abs() < 1e-9, "Disjoint docs: got {sim}");
     }
 
     #[test]

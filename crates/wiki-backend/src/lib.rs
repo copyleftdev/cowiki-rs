@@ -71,7 +71,7 @@ impl WikiBackend {
             raw_weights: g.raw_matrix().to_vec(),
             costs: g.costs().to_vec(),
             df: tfidf.df().clone(),
-            tfidf_vectors: tfidf.vectors().clone(),
+            tfidf_vectors: tfidf.vectors().to_vec(),
             pages,
             id_to_idx,
             temporal_state,
