@@ -1,12 +1,51 @@
-import { useState, useEffect, useCallback } from 'react'
-import {
-  Box, Flex, Text, Heading, TextField, Button, Card, Badge,
-  Separator, ScrollArea, TextArea, IconButton, Container,
-  DataList, Em, Strong, Code, Callout,
-} from '@radix-ui/themes'
-import * as Tabs from '@radix-ui/react-tabs'
-import * as Dialog from '@radix-ui/react-dialog'
-import { listPages, getPage, queryPages, createPage, runMaintain, getStats } from './api'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { listPages, getPage, queryPages, createPage, runMaintain, getStats, getPerf, runStress } from './api'
+import './index.css'
+
+function HealthRing({ value }) {
+  const r = 42, c = 2 * Math.PI * r
+  const pct = Math.max(0, Math.min(1, value))
+  const color = pct > 0.7 ? 'var(--green)' : pct > 0.3 ? 'var(--amber)' : 'var(--red)'
+  return (
+    <div className="health-ring">
+      <svg width="100" height="100">
+        <circle cx="50" cy="50" r={r} fill="none" stroke="var(--surface-2)" strokeWidth="6" />
+        <circle cx="50" cy="50" r={r} fill="none" stroke={color} strokeWidth="6"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)}
+          strokeLinecap="round" style={{ transition: 'stroke-dashoffset 0.6s ease' }} />
+      </svg>
+      <div className="center" style={{ color }}>{(pct * 100).toFixed(0)}%</div>
+    </div>
+  )
+}
+
+function LatencyBars({ stress }) {
+  if (!stress) return null
+  const max = stress.p99_us || 1
+  const bars = [
+    { label: 'min', value: stress.min_us, color: 'var(--green)' },
+    { label: 'p50', value: stress.p50_us, color: 'var(--cyan)' },
+    { label: 'p95', value: stress.p95_us, color: 'var(--amber)' },
+    { label: 'p99', value: stress.p99_us, color: 'var(--red)' },
+    { label: 'max', value: stress.max_us, color: 'var(--red)' },
+  ]
+  return (
+    <div>
+      {bars.map(b => (
+        <div className="latency-bar" key={b.label}>
+          <span className="lbl">{b.label}</span>
+          <div className="bar-bg">
+            <div className="bar-fill" style={{
+              width: `${(b.value / max) * 100}%`,
+              background: b.color,
+            }} />
+          </div>
+          <span className="val" style={{ color: b.color }}>{b.value}us</span>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 export default function App() {
   const [pages, setPages] = useState([])
@@ -14,27 +53,41 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
   const [stats, setStats] = useState(null)
+  const [perf, setPerf] = useState(null)
   const [maintainResult, setMaintainResult] = useState(null)
-  const [loading, setLoading] = useState(false)
+  const [stressResult, setStressResult] = useState(null)
+  const [busy, setBusy] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [newId, setNewId] = useState('')
   const [newTitle, setNewTitle] = useState('')
   const [newContent, setNewContent] = useState('')
+  const perfInterval = useRef(null)
 
   const refresh = useCallback(async () => {
-    const [p, s] = await Promise.all([listPages(), getStats()])
+    const [p, s, pf] = await Promise.all([listPages(), getStats(), getPerf()])
     setPages(p)
     setStats(s)
+    setPerf(pf)
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    refresh()
+    perfInterval.current = setInterval(async () => {
+      const [s, pf] = await Promise.all([getStats(), getPerf()])
+      setStats(s)
+      setPerf(pf)
+    }, 2000)
+    return () => clearInterval(perfInterval.current)
+  }, [refresh])
 
   const handleQuery = async () => {
     if (!query.trim()) return
-    setLoading(true)
+    setBusy(true)
     const r = await queryPages(query)
     setResults(r)
-    setLoading(false)
+    setBusy(false)
+    const pf = await getPerf()
+    setPerf(pf)
   }
 
   const handleSelect = async (id) => {
@@ -43,284 +96,274 @@ export default function App() {
   }
 
   const handleMaintain = async () => {
-    setLoading(true)
+    setBusy(true)
     const r = await runMaintain()
     setMaintainResult(r)
+    setBusy(false)
     await refresh()
-    setLoading(false)
+  }
+
+  const handleStress = async () => {
+    setBusy(true)
+    const r = await runStress(200, query || 'spreading activation')
+    setStressResult(r)
+    setBusy(false)
+    await refresh()
   }
 
   const handleCreate = async () => {
     if (!newId.trim() || !newTitle.trim()) return
+    setBusy(true)
     await createPage(newId, newTitle, newContent)
     setCreateOpen(false)
     setNewId('')
     setNewTitle('')
     setNewContent('')
+    setBusy(false)
     await refresh()
   }
 
-  const renderBacklinks = (content) => {
-    if (!content) return null
-    return content.replace(/\[\[([^\]]+)\]\]/g, (_, target) => {
-      return `[${target}]`
-    })
-  }
-
   return (
-    <Container size="4" p="4">
-      <Flex direction="column" gap="4">
-        <Flex justify="between" align="center">
-          <Box>
-            <Heading size="6">Co-Wiki</Heading>
-            <Text size="2" color="gray">
-              Spreading activation retrieval engine
-            </Text>
-          </Box>
-          <Flex gap="2" align="center">
-            {stats && (
-              <Flex gap="3">
-                <Badge variant="soft" color="cyan">{stats.page_count} pages</Badge>
-                <Badge variant="soft" color="orange">{stats.edge_count} edges</Badge>
-                <Badge variant="soft" color="purple">
-                  {(stats.density * 100).toFixed(1)}% density
-                </Badge>
-              </Flex>
+    <div className="app">
+      {/* ── Header ────────────────────────────────────────────── */}
+      <header className="header">
+        <div style={{ display: 'flex', alignItems: 'baseline' }}>
+          <h1>Co-Wiki</h1>
+          <span className="sub">Spreading Activation Engine</span>
+        </div>
+        <div className="header-stats">
+          {stats && <>
+            <span className="stat-pill cyan">{stats.page_count} pages</span>
+            <span className="stat-pill amber">{stats.edge_count} edges</span>
+            <span className="stat-pill purple">{(stats.density * 100).toFixed(1)}% density</span>
+          </>}
+          {perf && perf.queries > 0 &&
+            <span className="stat-pill green">{perf.query_avg_us.toFixed(0)}us avg</span>
+          }
+          <div className="mutex">
+            <div className={`mutex-dot ${busy ? 'busy' : ''}`} />
+            {busy ? 'LOCKED' : 'IDLE'}
+          </div>
+        </div>
+      </header>
+
+      {/* ── Left panel: Query + Pages ─────────────────────────── */}
+      <div className="panel">
+        <div className="panel-title">Retrieval</div>
+        <div className="search-box">
+          <input
+            placeholder="Query the knowledge graph..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleQuery()}
+          />
+          <button className="btn btn-primary" onClick={handleQuery} disabled={busy}>
+            Spread
+          </button>
+        </div>
+
+        {results && (
+          <div className="query-meta">
+            <span>score <strong>{results.total_score.toFixed(4)}</strong></span>
+            <span>cost <strong>{results.total_cost}</strong>t</span>
+            <span>iter <strong>{results.iterations}</strong></span>
+            <span>time <strong>{results.elapsed_us}</strong>us</span>
+            <span>{results.converged ? 'converged' : 'max iter'}</span>
+          </div>
+        )}
+
+        {results && results.pages.map(p => (
+          <div
+            key={p.id}
+            className={`result-card ${selected?.id === p.id ? 'active' : ''}`}
+            onClick={() => handleSelect(p.id)}
+          >
+            <div className="title">{p.title}</div>
+            <div className="id">{p.id}</div>
+            <div className="meta-row">
+              <span className="stat-pill cyan" style={{ fontSize: 10 }}>{p.token_cost}t</span>
+              {p.links_to.length > 0 &&
+                <span className="stat-pill amber" style={{ fontSize: 10 }}>
+                  {p.links_to.length} links
+                </span>
+              }
+            </div>
+          </div>
+        ))}
+
+        <div className="divider" />
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div className="panel-title" style={{ margin: 0 }}>All Pages</div>
+          <button className="btn btn-ghost btn-sm" onClick={() => setCreateOpen(true)}>+ New</button>
+        </div>
+
+        {pages.map(p => (
+          <div
+            key={p.id}
+            className={`result-card ${selected?.id === p.id ? 'active' : ''}`}
+            onClick={() => handleSelect(p.id)}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span className="title">{p.title}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{p.token_cost}t</span>
+            </div>
+            <div className="id">{p.id}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Center: Page viewer ───────────────────────────────── */}
+      <div className="panel">
+        {selected ? (
+          <div className="page-viewer">
+            <h1>{selected.title}</h1>
+            <div className="page-id">{selected.id} / {selected.token_cost} tokens</div>
+
+            {selected.links_to.length > 0 && (
+              <div className="backlinks">
+                {selected.links_to.map(link => (
+                  <button key={link} className="backlink" onClick={() => handleSelect(link)}>
+                    {link}
+                  </button>
+                ))}
+              </div>
             )}
-          </Flex>
-        </Flex>
 
-        <Separator size="4" />
+            <div className="divider" />
+            <div className="page-content">{selected.content}</div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <div className="big">G</div>
+            Search or select a page
+          </div>
+        )}
+      </div>
 
-        <Flex gap="4" style={{ minHeight: '70vh' }}>
-          {/* Left panel: Search + Page list */}
-          <Box style={{ width: '340px', flexShrink: 0 }}>
-            <Flex direction="column" gap="3">
-              <Flex gap="2">
-                <Box style={{ flex: 1 }}>
-                  <TextField.Root
-                    placeholder="Query the wiki..."
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
-                  />
-                </Box>
-                <Button onClick={handleQuery} disabled={loading}>
-                  Search
-                </Button>
-              </Flex>
+      {/* ── Right panel: Performance + REM ─────────────────────── */}
+      <div className="panel">
+        <div className="panel-title">Performance Counters</div>
 
-              {results && (
-                <Callout.Root size="1" color="cyan">
-                  <Callout.Text>
-                    {results.pages.length} results | score: {results.total_score.toFixed(3)} |
-                    {' '}{results.iterations} iterations |
-                    {' '}{results.converged ? 'converged' : 'max iter'}
-                  </Callout.Text>
-                </Callout.Root>
-              )}
+        {perf && (
+          <div className="perf-grid">
+            <div className="perf-card cyan">
+              <div className="label">Queries</div>
+              <div className="value">{perf.queries}</div>
+            </div>
+            <div className="perf-card green">
+              <div className="label">Avg Latency</div>
+              <div className="value">{perf.query_avg_us.toFixed(0)}<span className="unit">us</span></div>
+            </div>
+            <div className="perf-card amber">
+              <div className="label">Min / Max</div>
+              <div className="value" style={{ fontSize: 14 }}>
+                {perf.query_min_us}<span className="unit">us</span> / {perf.query_max_us}<span className="unit">us</span>
+              </div>
+            </div>
+            <div className="perf-card purple">
+              <div className="label">Lock Wait</div>
+              <div className="value">{perf.lock_avg_ns.toFixed(0)}<span className="unit">ns</span></div>
+            </div>
+            <div className="perf-card cyan">
+              <div className="label">Maintains</div>
+              <div className="value">{perf.maintains}</div>
+            </div>
+            <div className="perf-card amber">
+              <div className="label">Creates</div>
+              <div className="value">{perf.creates}</div>
+            </div>
+          </div>
+        )}
 
-              {/* Query results */}
-              {results && results.pages.length > 0 && (
-                <Box>
-                  <Text size="2" weight="bold" color="gray">Results</Text>
-                  <Flex direction="column" gap="1" mt="1">
-                    {results.pages.map((p) => (
-                      <Card
-                        key={p.id}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => handleSelect(p.id)}
-                      >
-                        <Flex justify="between" align="center">
-                          <Text size="2" weight="medium">{p.title}</Text>
-                          <Badge size="1" variant="outline">{p.token_cost}t</Badge>
-                        </Flex>
-                        <Text size="1" color="gray">{p.id}</Text>
-                      </Card>
-                    ))}
-                  </Flex>
-                </Box>
-              )}
+        <div className="divider" />
 
-              <Separator size="4" />
+        {/* Stress test */}
+        <div className="panel-title">Stress Test</div>
+        <button className="btn btn-primary" onClick={handleStress} disabled={busy}
+          style={{ width: '100%', marginBottom: 12 }}>
+          Fire 200 Queries
+        </button>
 
-              {/* All pages */}
-              <Flex justify="between" align="center">
-                <Text size="2" weight="bold" color="gray">All Pages</Text>
-                <Dialog.Root open={createOpen} onOpenChange={setCreateOpen}>
-                  <Dialog.Trigger asChild>
-                    <Button size="1" variant="soft">+ New</Button>
-                  </Dialog.Trigger>
-                  <Dialog.Portal>
-                    <Dialog.Overlay style={{
-                      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)'
-                    }} />
-                    <Dialog.Content style={{
-                      position: 'fixed', top: '50%', left: '50%',
-                      transform: 'translate(-50%,-50%)',
-                      background: 'var(--gray-2)', borderRadius: 8,
-                      padding: 24, width: 420,
-                    }}>
-                      <Dialog.Title asChild>
-                        <Heading size="4" mb="3">Create Page</Heading>
-                      </Dialog.Title>
-                      <Flex direction="column" gap="3">
-                        <TextField.Root
-                          placeholder="page-id (e.g. ai/transformers)"
-                          value={newId}
-                          onChange={(e) => setNewId(e.target.value)}
-                        />
-                        <TextField.Root
-                          placeholder="Page Title"
-                          value={newTitle}
-                          onChange={(e) => setNewTitle(e.target.value)}
-                        />
-                        <TextArea
-                          placeholder="Content with [[backlinks]]..."
-                          value={newContent}
-                          onChange={(e) => setNewContent(e.target.value)}
-                          rows={6}
-                        />
-                        <Flex gap="2" justify="end">
-                          <Dialog.Close asChild>
-                            <Button variant="soft" color="gray">Cancel</Button>
-                          </Dialog.Close>
-                          <Button onClick={handleCreate}>Create</Button>
-                        </Flex>
-                      </Flex>
-                    </Dialog.Content>
-                  </Dialog.Portal>
-                </Dialog.Root>
-              </Flex>
+        {stressResult && (
+          <>
+            <div className="perf-grid">
+              <div className="perf-card green">
+                <div className="label">Throughput</div>
+                <div className="value">{stressResult.throughput_qps.toFixed(0)}<span className="unit">qps</span></div>
+              </div>
+              <div className="perf-card cyan">
+                <div className="label">Avg</div>
+                <div className="value">{stressResult.avg_us.toFixed(0)}<span className="unit">us</span></div>
+              </div>
+            </div>
+            <LatencyBars stress={stressResult} />
+          </>
+        )}
 
-              <ScrollArea style={{ maxHeight: '40vh' }}>
-                <Flex direction="column" gap="1">
-                  {pages.map((p) => (
-                    <Card
-                      key={p.id}
-                      size="1"
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => handleSelect(p.id)}
-                    >
-                      <Flex justify="between" align="center">
-                        <Text size="2">{p.title}</Text>
-                        <Flex gap="1">
-                          {p.link_count > 0 && (
-                            <Badge size="1" variant="outline" color="orange">
-                              {p.link_count}
-                            </Badge>
-                          )}
-                          <Badge size="1" variant="outline">{p.token_cost}t</Badge>
-                        </Flex>
-                      </Flex>
-                      <Text size="1" color="gray">{p.id}</Text>
-                    </Card>
-                  ))}
-                </Flex>
-              </ScrollArea>
+        <div className="divider" />
 
-              <Separator size="4" />
+        {/* REM Agent */}
+        <div className="panel-title">REM Agent</div>
 
-              {/* REM Agent controls */}
-              <Box>
-                <Text size="2" weight="bold" color="gray">REM Agent</Text>
-                <Flex direction="column" gap="2" mt="2">
-                  <Button
-                    variant="soft"
-                    color="purple"
-                    onClick={handleMaintain}
-                    disabled={loading}
-                  >
-                    Run Maintenance Cycle
-                  </Button>
-                  {maintainResult && (
-                    <Card size="1">
-                      <DataList.Root size="1">
-                        <DataList.Item>
-                          <DataList.Label>Health</DataList.Label>
-                          <DataList.Value>
-                            <Badge color={maintainResult.health > 0.5 ? 'green' : 'red'}>
-                              {(maintainResult.health * 100).toFixed(1)}%
-                            </Badge>
-                          </DataList.Value>
-                        </DataList.Item>
-                        <DataList.Item>
-                          <DataList.Label>Pruned</DataList.Label>
-                          <DataList.Value>{maintainResult.pruned_count}</DataList.Value>
-                        </DataList.Item>
-                        <DataList.Item>
-                          <DataList.Label>Dreamed</DataList.Label>
-                          <DataList.Value>{maintainResult.dreamed_count} edges</DataList.Value>
-                        </DataList.Item>
-                      </DataList.Root>
-                      {maintainResult.dreamed_edges.length > 0 && (
-                        <Box mt="2">
-                          <Text size="1" color="purple">Suggested backlinks:</Text>
-                          {maintainResult.dreamed_edges.map(([src, dst], i) => (
-                            <Text key={i} size="1" as="div" color="gray">
-                              {src} → {dst}
-                            </Text>
-                          ))}
-                        </Box>
-                      )}
-                    </Card>
-                  )}
-                </Flex>
-              </Box>
-            </Flex>
-          </Box>
+        {maintainResult && <HealthRing value={maintainResult.health} />}
 
-          {/* Right panel: Page viewer */}
-          <Box style={{ flex: 1 }}>
-            {selected ? (
-              <Card size="3">
-                <Flex direction="column" gap="3">
-                  <Box>
-                    <Heading size="5">{selected.title}</Heading>
-                    <Flex gap="2" mt="1">
-                      <Badge variant="soft">{selected.id}</Badge>
-                      <Badge variant="soft" color="orange">{selected.token_cost} tokens</Badge>
-                    </Flex>
-                  </Box>
+        <button className="btn btn-purple" onClick={handleMaintain} disabled={busy}
+          style={{ width: '100%', marginBottom: 12 }}>
+          Run Maintenance Cycle
+        </button>
 
-                  {selected.links_to.length > 0 && (
-                    <Box>
-                      <Text size="2" color="gray" weight="bold">Backlinks</Text>
-                      <Flex gap="1" mt="1" wrap="wrap">
-                        {selected.links_to.map((link) => (
-                          <Badge
-                            key={link}
-                            variant="soft"
-                            color="cyan"
-                            style={{ cursor: 'pointer' }}
-                            onClick={() => handleSelect(link)}
-                          >
-                            {link}
-                          </Badge>
-                        ))}
-                      </Flex>
-                    </Box>
-                  )}
+        {maintainResult && (
+          <div>
+            <div className="perf-grid">
+              <div className="perf-card green">
+                <div className="label">Health</div>
+                <div className="value">{(maintainResult.health * 100).toFixed(0)}<span className="unit">%</span></div>
+              </div>
+              <div className="perf-card amber">
+                <div className="label">Time</div>
+                <div className="value">{(maintainResult.elapsed_us / 1000).toFixed(1)}<span className="unit">ms</span></div>
+              </div>
+              <div className="perf-card red">
+                <div className="label">Pruned</div>
+                <div className="value">{maintainResult.pruned_count}</div>
+              </div>
+              <div className="perf-card purple">
+                <div className="label">Dreamed</div>
+                <div className="value">{maintainResult.dreamed_count}</div>
+              </div>
+            </div>
 
-                  <Separator size="4" />
-
-                  <ScrollArea style={{ maxHeight: '60vh' }}>
-                    <Text as="div" size="2" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
-                      {selected.content}
-                    </Text>
-                  </ScrollArea>
-                </Flex>
-              </Card>
-            ) : (
-              <Flex align="center" justify="center" style={{ height: '100%' }}>
-                <Text color="gray" size="3">
-                  Search or select a page to view
-                </Text>
-              </Flex>
+            {maintainResult.dreamed_edges.length > 0 && (
+              <div>
+                <div className="panel-title">Discovered Backlinks</div>
+                {maintainResult.dreamed_edges.map(([src, dst], i) => (
+                  <div key={i} className="dream-edge">
+                    {src} <span>-&gt;</span> {dst}
+                  </div>
+                ))}
+              </div>
             )}
-          </Box>
-        </Flex>
-      </Flex>
-    </Container>
+          </div>
+        )}
+      </div>
+
+      {/* ── Create dialog ──────────────────────────────────────── */}
+      {createOpen && (
+        <>
+          <div className="dialog-overlay" onClick={() => setCreateOpen(false)} />
+          <div className="dialog-content">
+            <h2>Create Page</h2>
+            <input placeholder="page-id (e.g. ai/transformers)" value={newId} onChange={e => setNewId(e.target.value)} />
+            <input placeholder="Page Title" value={newTitle} onChange={e => setNewTitle(e.target.value)} />
+            <textarea placeholder="Content with [[backlinks]]..." value={newContent} onChange={e => setNewContent(e.target.value)} />
+            <div className="dialog-buttons">
+              <button className="btn btn-ghost" onClick={() => setCreateOpen(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleCreate} disabled={busy}>Create</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   )
 }

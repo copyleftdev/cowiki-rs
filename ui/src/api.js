@@ -1,49 +1,30 @@
 const API = 'http://localhost:3001/api'
 
-export async function listPages() {
-  const res = await fetch(`${API}/pages`)
-  return res.json()
-}
+export const listPages = () => fetch(`${API}/pages`).then(r => r.json())
+export const getPage = id => fetch(`${API}/pages/${id}`).then(r => r.ok ? r.json() : null)
+export const getStats = () => fetch(`${API}/stats`).then(r => r.json())
+export const getPerf = () => fetch(`${API}/perf`).then(r => r.json())
 
-export async function getPage(id) {
-  const res = await fetch(`${API}/pages/${id}`)
-  if (!res.ok) return null
-  return res.json()
-}
-
-export async function queryPages(query, budget = 4000) {
-  const res = await fetch(`${API}/query`, {
+export const queryPages = (query, budget = 4000) =>
+  fetch(`${API}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, budget }),
-  })
-  return res.json()
-}
+  }).then(r => r.json())
 
-export async function createPage(id, title, content) {
-  const res = await fetch(`${API}/pages`, {
+export const createPage = (id, title, content) =>
+  fetch(`${API}/pages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, title, content }),
-  })
-  return res.ok
-}
+  }).then(r => r.ok)
 
-export async function updatePage(id, content) {
-  const res = await fetch(`${API}/pages/${id}`, {
-    method: 'PUT',
+export const runMaintain = () =>
+  fetch(`${API}/maintain`, { method: 'POST' }).then(r => r.json())
+
+export const runStress = (n = 100, query = 'spreading activation') =>
+  fetch(`${API}/stress`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
-  })
-  return res.ok
-}
-
-export async function runMaintain() {
-  const res = await fetch(`${API}/maintain`, { method: 'POST' })
-  return res.json()
-}
-
-export async function getStats() {
-  const res = await fetch(`${API}/stats`)
-  return res.json()
-}
+    body: JSON.stringify({ n, query }),
+  }).then(r => r.json())
