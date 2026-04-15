@@ -60,6 +60,22 @@ body {
 .stat-pill.amber { background: var(--amber-dim); color: var(--amber); }
 .stat-pill.purple { background: var(--purple-dim); color: var(--purple); }
 
+.tab-btn {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover { color: var(--text); border-color: var(--border); }
+.tab-btn.active { background: var(--cyan-dim); color: var(--cyan); border-color: var(--cyan); }
+
 .mutex {
   display: flex;
   align-items: center;

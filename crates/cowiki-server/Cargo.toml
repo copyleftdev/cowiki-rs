@@ -8,7 +8,10 @@ description = "HTTP API server for the Co-Wiki backend"
 wiki-backend = { path = "../wiki-backend" }
 spread = { path = "../spread" }
 temporal-graph = { path = "../temporal-graph" }
-axum = "0.8"
+axum = { version = "0.8", features = ["default"] }
+futures = "0.3"
+tokio-stream = "0.1"
+tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

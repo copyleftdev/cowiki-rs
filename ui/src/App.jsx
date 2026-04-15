@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { listPages, getPage, queryPages, createPage, runMaintain, getStats, getPerf, runStress } from './api'
+import SimulationTab from './SimulationTab'
 import './index.css'
 
 function HealthRing({ value }) {
@@ -61,6 +62,7 @@ export default function App() {
   const [newId, setNewId] = useState('')
   const [newTitle, setNewTitle] = useState('')
   const [newContent, setNewContent] = useState('')
+  const [tab, setTab] = useState('wiki')
   const perfInterval = useRef(null)
 
   const exampleQueries = [
@@ -140,9 +142,21 @@ export default function App() {
     <div className="app">
       {/* ── Header ────────────────────────────────────────────── */}
       <header className="header">
-        <div style={{ display: 'flex', alignItems: 'baseline' }}>
-          <h1>Co-Wiki</h1>
-          <span className="sub">Spreading Activation Engine</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline' }}>
+            <h1>Co-Wiki</h1>
+            <span className="sub">Spreading Activation Engine</span>
+          </div>
+          <div style={{ display: 'flex', gap: 2, marginLeft: 16 }}>
+            <button
+              className={`tab-btn ${tab === 'wiki' ? 'active' : ''}`}
+              onClick={() => setTab('wiki')}
+            >Wiki</button>
+            <button
+              className={`tab-btn ${tab === 'simulate' ? 'active' : ''}`}
+              onClick={() => setTab('simulate')}
+            >Simulation</button>
+          </div>
         </div>
         <div className="header-stats">
           {stats && <>
@@ -159,6 +173,12 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {tab === 'simulate' ? (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <SimulationTab />
+        </div>
+      ) : <>
 
       {/* ── Left panel: Query + Pages ─────────────────────────── */}
       <div className="panel">
@@ -380,6 +400,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      </>}
 
       {/* ── Create dialog ──────────────────────────────────────── */}
       {createOpen && (

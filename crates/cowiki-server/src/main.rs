@@ -1,12 +1,17 @@
+mod simulate;
+
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
@@ -362,6 +367,38 @@ async fn stress_handler(
     })
 }
 
+// ─── Simulation (SSE) ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SimulateParams {
+    #[serde(default = "default_seed_pages")]
+    pages: usize,
+    #[serde(default = "default_ops")]
+    ops: usize,
+}
+
+fn default_seed_pages() -> usize { 150 }
+fn default_ops() -> usize { 300 }
+
+async fn simulate_handler(
+    AxumQuery(params): AxumQuery<SimulateParams>,
+) -> Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<simulate::Event>(512);
+
+    tokio::task::spawn_blocking(move || {
+        simulate::run_simulation(params.pages, params.ops, |event| {
+            let _ = tx.blocking_send(event);
+        });
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|event| {
+        let json = serde_json::to_string(&event).unwrap_or_default();
+        Ok(SseEvent::default().data(json))
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -397,6 +434,7 @@ async fn main() {
         .route("/api/stats", get(stats_handler))
         .route("/api/perf", get(perf_handler))
         .route("/api/stress", post(stress_handler))
+        .route("/api/simulate", get(simulate_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

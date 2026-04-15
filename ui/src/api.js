@@ -30,3 +30,14 @@ export const runStress = (n = 100, query = 'spreading activation') =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ n, query }),
   }).then(r => r.json())
+
+export function startSimulation(pages = 150, ops = 300, onEvent) {
+  const es = new EventSource(`${API}/simulate?pages=${pages}&ops=${ops}`)
+  es.onmessage = (e) => {
+    const event = JSON.parse(e.data)
+    onEvent(event)
+    if (event.type === 'done') es.close()
+  }
+  es.onerror = () => es.close()
+  return es
+}
