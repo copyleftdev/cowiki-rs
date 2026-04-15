@@ -1,67 +1,87 @@
 import { useState, useRef, useEffect } from 'react'
 import { startSimulation } from './api'
 
-function HealthRing({ value, size = 80 }) {
+function Ring({ value, size = 90, label }) {
   const r = size / 2 - 6, c = 2 * Math.PI * r
   const pct = Math.max(0, Math.min(1, value))
   const color = pct > 0.7 ? 'var(--green)' : pct > 0.3 ? 'var(--amber)' : 'var(--red)'
   return (
-    <div style={{ width: size, height: size, position: 'relative', flexShrink: 0 }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--surface-2)" strokeWidth="5" />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="5"
-          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 0.3s ease' }} />
-      </svg>
-      <div style={{
-        position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-        fontSize: 14, fontWeight: 300, color, fontVariantNumeric: 'tabular-nums'
-      }}>{(pct * 100).toFixed(0)}%</div>
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ width: size, height: size, position: 'relative', margin: '0 auto' }}>
+        <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--surface-2)" strokeWidth="4" />
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="4"
+            strokeDasharray={c} strokeDashoffset={c * (1 - pct)} strokeLinecap="round"
+            style={{ transition: 'stroke-dashoffset 0.2s ease' }} />
+        </svg>
+        <div style={{
+          position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+          fontSize: 16, fontWeight: 300, color, fontVariantNumeric: 'tabular-nums'
+        }}>{(pct * 100).toFixed(0)}%</div>
+      </div>
+      {label && <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: 1, color: 'var(--text-dim)', marginTop: 4 }}>{label}</div>}
     </div>
   )
 }
 
-function Metric({ label, value, unit, color = 'var(--cyan)' }) {
+function Big({ value, unit, label, color = 'var(--cyan)' }) {
   return (
-    <div style={{
-      background: 'var(--surface-2)', borderRadius: 6, padding: '8px 10px',
-      minWidth: 90,
-    }}>
-      <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: 1, color: 'var(--text-dim)' }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 300, color, fontVariantNumeric: 'tabular-nums' }}>
-        {value}<span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 2 }}>{unit}</span>
+    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', textAlign: 'center' }}>
+      <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: 1.5, color: 'var(--text-dim)', fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 300, color, fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>
+        {value}<span style={{ fontSize: 12, color: 'var(--text-dim)', marginLeft: 3 }}>{unit}</span>
       </div>
     </div>
   )
 }
 
-function EventLine({ event }) {
-  const colors = {
-    seed: 'var(--purple)',
-    query: 'var(--cyan)',
-    maintain: 'var(--green)',
-    create: 'var(--amber)',
-    done: 'var(--text)',
-  }
-  const color = colors[event.type] || 'var(--text-dim)'
-
-  let detail = ''
-  if (event.type === 'seed') detail = `${event.page_count} pages, ${event.edge_count} edges, ${event.elapsed_us}us`
-  if (event.type === 'query') detail = `"${event.query}" -> ${event.results} pages, ${event.score.toFixed(3)}, ${event.iterations}iter, ${event.elapsed_us}us`
-  if (event.type === 'maintain') detail = `health=${(event.health*100).toFixed(0)}% pruned=${event.pruned} dreamed=${event.dreamed} ${event.elapsed_us}us`
-  if (event.type === 'create') detail = `${event.id} (${event.tokens}t, ${event.links}lnk) -> ${event.page_count}pg ${event.edge_count}edg ${event.elapsed_us}us`
-  if (event.type === 'done') detail = `${event.total_ops} ops, ${event.final_pages}pg, p50=${event.query_p50_us}us p99=${event.query_p99_us}us`
-
+function Sparkline({ data, max, height = 50, color = 'var(--cyan)' }) {
+  const m = max || Math.max(...data, 1)
   return (
     <div style={{
-      fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
-      padding: '2px 0', borderBottom: '1px solid var(--border)',
-      lineHeight: 1.6,
+      height, background: 'var(--surface)', borderRadius: 6,
+      display: 'flex', alignItems: 'flex-end', gap: 1, overflow: 'hidden',
+      border: '1px solid var(--border)', padding: '2px 1px',
     }}>
-      <span style={{ color, fontWeight: 600, width: 60, display: 'inline-block' }}>
-        {event.type.toUpperCase()}
-      </span>
-      <span style={{ color: 'var(--text-dim)' }}>{detail}</span>
+      {data.map((v, i) => (
+        <div key={i} style={{
+          flex: 1, minWidth: 1.5,
+          height: `${Math.max(2, (v / m) * 100)}%`,
+          background: v > m * 0.85 ? 'var(--red)' : v > m * 0.6 ? 'var(--amber)' : color,
+          borderRadius: '1px 1px 0 0',
+        }} />
+      ))}
+    </div>
+  )
+}
+
+function EventFeed({ events }) {
+  const ref = useRef(null)
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [events])
+
+  const colors = { seed: 'var(--purple)', query: 'var(--cyan)', maintain: 'var(--green)', create: 'var(--amber)', done: 'var(--text)' }
+
+  const fmt = (e) => {
+    if (e.type === 'seed') return `seeded ${e.page_count} pages, ${e.edge_count} edges`
+    if (e.type === 'query') return `"${e.query}" ${e.results}pg ${e.score.toFixed(3)} ${e.iterations}i ${e.elapsed_us}us`
+    if (e.type === 'maintain') return `health=${(e.health*100).toFixed(0)}% -${e.pruned} +${e.dreamed}dream ${e.elapsed_us}us`
+    if (e.type === 'create') return `${e.id} ${e.page_count}pg ${e.edge_count}edg ${e.elapsed_us}us`
+    if (e.type === 'done') return `done: ${e.total_ops}ops ${e.final_pages}pg p50=${e.query_p50_us}us p99=${e.query_p99_us}us`
+    return ''
+  }
+
+  return (
+    <div ref={ref} style={{
+      flex: 1, overflow: 'auto', background: 'var(--surface)',
+      borderRadius: 6, border: '1px solid var(--border)', padding: '4px 8px',
+      fontFamily: "'JetBrains Mono', monospace", fontSize: 10, lineHeight: 1.7,
+    }}>
+      {events.map((e, i) => (
+        <div key={i} style={{ borderBottom: '1px solid var(--border)', padding: '1px 0' }}>
+          <span style={{ color: colors[e.type], fontWeight: 600, display: 'inline-block', width: 52 }}>{e.type.toUpperCase()}</span>
+          <span style={{ color: 'var(--text-dim)' }}>{fmt(e)}</span>
+        </div>
+      ))}
     </div>
   )
 }
@@ -70,46 +90,72 @@ export default function SimulationTab() {
   const [running, setRunning] = useState(false)
   const [events, setEvents] = useState([])
   const [summary, setSummary] = useState(null)
-  const [liveStats, setLiveStats] = useState({ pages: 0, edges: 0, health: 1, queries: 0, maintains: 0, creates: 0 })
-  const [latencies, setLatencies] = useState([])
   const [pages, setPages] = useState(150)
-  const [ops, setOps] = useState(300)
-  const logRef = useRef(null)
+  const [ops, setOps] = useState(500)
   const esRef = useRef(null)
 
-  useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
-    }
-  }, [events])
+  // Live accumulators
+  const [live, setLive] = useState({
+    pageCount: 0, edgeCount: 0, density: 0,
+    health: 1, healthHistory: [],
+    queries: 0, queryAvg: 0, queryTotal: 0,
+    maintains: 0, creates: 0,
+    pruned: 0, dreamed: 0,
+    latencies: [], iterations: [],
+    convergenceRate: 0,
+  })
 
   const handleStart = () => {
     setRunning(true)
     setEvents([])
     setSummary(null)
-    setLiveStats({ pages: 0, edges: 0, health: 1, queries: 0, maintains: 0, creates: 0 })
-    setLatencies([])
+    setLive({
+      pageCount: 0, edgeCount: 0, density: 0,
+      health: 1, healthHistory: [],
+      queries: 0, queryAvg: 0, queryTotal: 0,
+      maintains: 0, creates: 0,
+      pruned: 0, dreamed: 0,
+      latencies: [], iterations: [],
+      convergenceRate: 0,
+    })
 
     esRef.current = startSimulation(pages, ops, (event) => {
-      setEvents(prev => [...prev.slice(-500), event])
+      setEvents(prev => [...prev.slice(-300), event])
 
-      if (event.type === 'seed') {
-        setLiveStats(s => ({ ...s, pages: event.page_count, edges: event.edge_count }))
-      }
-      if (event.type === 'query') {
-        setLiveStats(s => ({ ...s, queries: s.queries + 1 }))
-        setLatencies(prev => [...prev.slice(-200), event.elapsed_us])
-      }
-      if (event.type === 'maintain') {
-        setLiveStats(s => ({ ...s, maintains: s.maintains + 1, health: event.health }))
-      }
-      if (event.type === 'create') {
-        setLiveStats(s => ({ ...s, creates: s.creates + 1, pages: event.page_count, edges: event.edge_count }))
-      }
-      if (event.type === 'done') {
-        setSummary(event)
-        setRunning(false)
-      }
+      setLive(s => {
+        const next = { ...s }
+        if (event.type === 'seed') {
+          next.pageCount = event.page_count
+          next.edgeCount = event.edge_count
+          next.density = event.density
+        }
+        if (event.type === 'query') {
+          next.queries++
+          next.queryTotal += event.elapsed_us
+          next.queryAvg = next.queryTotal / next.queries
+          next.latencies = [...s.latencies.slice(-150), event.elapsed_us]
+          next.iterations = [...s.iterations.slice(-150), event.iterations]
+          next.convergenceRate = event.converged ? s.convergenceRate * 0.95 + 0.05 : s.convergenceRate * 0.95
+        }
+        if (event.type === 'maintain') {
+          next.maintains++
+          next.health = event.health
+          next.healthHistory = [...s.healthHistory.slice(-50), event.health]
+          next.pruned += event.pruned
+          next.dreamed += event.dreamed
+        }
+        if (event.type === 'create') {
+          next.creates++
+          next.pageCount = event.page_count
+          next.edgeCount = event.edge_count
+          if (next.pageCount > 1) next.density = next.edgeCount / (next.pageCount * (next.pageCount - 1))
+        }
+        if (event.type === 'done') {
+          setSummary(event)
+          setRunning(false)
+        }
+        return next
+      })
     })
   }
 
@@ -118,106 +164,104 @@ export default function SimulationTab() {
     setRunning(false)
   }
 
-  const avgLatency = latencies.length > 0
-    ? (latencies.reduce((a, b) => a + b, 0) / latencies.length).toFixed(0)
-    : 0
-  const maxLatency = latencies.length > 0 ? Math.max(...latencies) : 1
+  const maxLat = live.latencies.length > 0 ? Math.max(...live.latencies) : 1
+  const maxIter = live.iterations.length > 0 ? Math.max(...live.iterations) : 1
+
+  const inputStyle = {
+    width: 60, background: 'var(--surface-2)', border: '1px solid var(--border)',
+    borderRadius: 4, color: 'var(--text)', padding: '4px 8px', fontSize: 12, fontFamily: 'inherit',
+  }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 1, height: '100%', background: 'var(--border)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)', gap: 1 }}>
 
-      {/* Left: Event log */}
-      <div style={{ background: 'var(--surface)', padding: 16, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div className="panel-title" style={{ margin: 0 }}>Simulation Log</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-              Pages: <input type="number" value={pages} onChange={e => setPages(+e.target.value)}
-                style={{ width: 50, background: 'var(--surface-2)', border: '1px solid var(--border)',
-                  borderRadius: 4, color: 'var(--text)', padding: '2px 6px', fontSize: 11 }} />
-            </label>
-            <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-              Ops: <input type="number" value={ops} onChange={e => setOps(+e.target.value)}
-                style={{ width: 50, background: 'var(--surface-2)', border: '1px solid var(--border)',
-                  borderRadius: 4, color: 'var(--text)', padding: '2px 6px', fontSize: 11 }} />
-            </label>
-            {running
-              ? <button className="btn" style={{ background: 'var(--red)', color: '#fff', padding: '4px 12px' }} onClick={handleStop}>Stop</button>
-              : <button className="btn btn-primary" style={{ padding: '4px 12px' }} onClick={handleStart}>Run Simulation</button>
-            }
-          </div>
+      {/* ── Control bar ──────────────────────────────────────── */}
+      <div style={{
+        background: 'var(--surface)', padding: '8px 16px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Seed pages</span>
+          <input type="number" value={pages} onChange={e => setPages(+e.target.value)} style={inputStyle} />
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Operations</span>
+          <input type="number" value={ops} onChange={e => setOps(+e.target.value)} style={inputStyle} />
         </div>
-
-        <div ref={logRef} style={{
-          flex: 1, overflow: 'auto', background: 'var(--surface-2)',
-          borderRadius: 6, padding: 8, border: '1px solid var(--border)',
-        }}>
-          {events.length === 0 && !running && (
-            <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', padding: 40 }}>
-              Click "Run Simulation" to generate an ephemeral wiki and watch<br />
-              spreading activation, REM cycles, and page creation in real time.
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {running && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div className="mutex-dot busy" />
+              <span style={{ fontSize: 11, color: 'var(--amber)' }}>
+                {live.queries + live.maintains + live.creates} / {ops}
+              </span>
             </div>
           )}
-          {events.map((e, i) => <EventLine key={i} event={e} />)}
+          {running
+            ? <button className="btn" style={{ background: 'var(--red)', color: '#fff' }} onClick={handleStop}>Stop</button>
+            : <button className="btn btn-primary" onClick={handleStart}>Run Simulation</button>
+          }
         </div>
       </div>
 
-      {/* Right: Live telemetry */}
-      <div style={{ background: 'var(--surface)', padding: 16, overflow: 'auto' }}>
-        <div className="panel-title">Live Telemetry</div>
+      {/* ── Top counters ─────────────────────────────────────── */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 1, background: 'var(--border)',
+      }}>
+        <Big label="Pages" value={live.pageCount} unit="" color="var(--cyan)" />
+        <Big label="Edges" value={live.edgeCount} unit="" color="var(--amber)" />
+        <Big label="Density" value={(live.density * 100).toFixed(1)} unit="%" color="var(--purple)" />
+        <Big label="Queries" value={live.queries} unit="" color="var(--green)" />
+        <Big label="Avg Latency" value={live.queryAvg.toFixed(0)} unit="us" color="var(--cyan)" />
+        <Big label="Maintains" value={live.maintains} unit="" color="var(--purple)" />
+        <Big label="Pruned" value={live.pruned} unit="" color="var(--red)" />
+        <Big label="Dreamed" value={live.dreamed} unit="" color="var(--purple)" />
+      </div>
 
-        {/* Health ring */}
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
-          <HealthRing value={liveStats.health} size={100} />
+      {/* ── Middle: charts + REM ─────────────────────────────── */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: '1fr 1fr 200px', gap: 1, background: 'var(--border)', flex: '0 0 auto',
+      }}>
+        {/* Latency chart */}
+        <div style={{ background: 'var(--surface)', padding: 12 }}>
+          <div className="panel-title">Query Latency</div>
+          <Sparkline data={live.latencies.slice(-120)} max={maxLat} height={70} color="var(--cyan)" />
+          {summary && (
+            <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>
+              <span>p50 <strong style={{ color: 'var(--green)' }}>{summary.query_p50_us}us</strong></span>
+              <span>p95 <strong style={{ color: 'var(--amber)' }}>{summary.query_p95_us}us</strong></span>
+              <span>p99 <strong style={{ color: 'var(--red)' }}>{summary.query_p99_us}us</strong></span>
+              <span>avg <strong style={{ color: 'var(--cyan)' }}>{summary.query_avg_us.toFixed(0)}us</strong></span>
+            </div>
+          )}
         </div>
 
-        {/* Counters */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
-          <Metric label="Pages" value={liveStats.pages} unit="" color="var(--cyan)" />
-          <Metric label="Edges" value={liveStats.edges} unit="" color="var(--amber)" />
-          <Metric label="Queries" value={liveStats.queries} unit="" color="var(--green)" />
-          <Metric label="Avg Latency" value={avgLatency} unit="us" color="var(--cyan)" />
-          <Metric label="Maintains" value={liveStats.maintains} unit="" color="var(--purple)" />
-          <Metric label="Creates" value={liveStats.creates} unit="" color="var(--amber)" />
+        {/* Convergence chart */}
+        <div style={{ background: 'var(--surface)', padding: 12 }}>
+          <div className="panel-title">Convergence (iterations per query)</div>
+          <Sparkline data={live.iterations.slice(-120)} max={maxIter} height={70} color="var(--green)" />
+          {live.iterations.length > 0 && (
+            <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11 }}>
+              <span>avg <strong style={{ color: 'var(--green)' }}>
+                {(live.iterations.reduce((a,b)=>a+b,0)/live.iterations.length).toFixed(1)}
+              </strong> iter</span>
+              <span>max <strong style={{ color: 'var(--amber)' }}>{Math.max(...live.iterations)}</strong></span>
+            </div>
+          )}
         </div>
 
-        {/* Latency sparkline */}
-        {latencies.length > 0 && (
-          <>
-            <div className="panel-title">Query Latency</div>
-            <div style={{
-              height: 60, background: 'var(--surface-2)', borderRadius: 6,
-              padding: '4px 0', display: 'flex', alignItems: 'flex-end', gap: 1,
-              overflow: 'hidden', marginBottom: 16,
-            }}>
-              {latencies.slice(-100).map((us, i) => (
-                <div key={i} style={{
-                  flex: 1, minWidth: 2,
-                  height: `${Math.max(2, (us / maxLatency) * 100)}%`,
-                  background: us > maxLatency * 0.8 ? 'var(--red)'
-                    : us > maxLatency * 0.5 ? 'var(--amber)' : 'var(--cyan)',
-                  borderRadius: '2px 2px 0 0',
-                  transition: 'height 0.1s',
-                }} />
-              ))}
+        {/* REM Agent */}
+        <div style={{ background: 'var(--surface)', padding: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <Ring value={live.health} size={80} label="Graph Health" />
+          {live.healthHistory.length > 1 && (
+            <div style={{ width: '100%', marginTop: 8 }}>
+              <Sparkline data={live.healthHistory} max={1} height={24} color="var(--green)" />
             </div>
-          </>
-        )}
+          )}
+        </div>
+      </div>
 
-        {/* Summary */}
-        {summary && (
-          <>
-            <div className="panel-title">Final Results</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Metric label="Total Ops" value={summary.total_ops} unit="" color="var(--text)" />
-              <Metric label="Total Time" value={(summary.total_us / 1000).toFixed(1)} unit="ms" color="var(--text)" />
-              <Metric label="Query p50" value={summary.query_p50_us} unit="us" color="var(--green)" />
-              <Metric label="Query p99" value={summary.query_p99_us} unit="us" color="var(--red)" />
-              <Metric label="Final Pages" value={summary.final_pages} unit="" color="var(--cyan)" />
-              <Metric label="Final Edges" value={summary.final_edges} unit="" color="var(--amber)" />
-            </div>
-          </>
-        )}
+      {/* ── Bottom: event feed ───────────────────────────────── */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0 0 0 0' }}>
+        <EventFeed events={events} />
       </div>
     </div>
   )
