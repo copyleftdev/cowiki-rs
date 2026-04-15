@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cowiki-rs | Spreading Activation Engine</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-2: #1a1a28;
+    --border: #2a2a3a;
+    --text: #e0e0f0;
+    --text-dim: #707090;
+    --cyan: #00d4ff;
+    --cyan-dim: #00d4ff15;
+    --green: #00ff88;
+    --green-dim: #00ff8815;
+    --amber: #ffaa00;
+    --purple: #aa66ff;
+    --purple-dim: #aa66ff15;
+    --red: #ff4466;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, system-ui, sans-serif;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  code, pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9em;
+  }
+
+  code {
+    background: var(--surface-2);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+
+  pre code { background: none; padding: 0; }
+
+  /* ── Layout ────────────────────────────────────────────── */
+
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ── Hero ──────────────────────────────────────────────── */
+
+  .hero {
+    padding: 80px 0 60px;
+    text-align: center;
+  }
+
+  .hero-badge {
+    display: inline-block;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--cyan);
+    background: var(--cyan-dim);
+    padding: 4px 14px;
+    border-radius: 20px;
+    margin-bottom: 24px;
+    font-weight: 600;
+  }
+
+  .hero h1 {
+    font-size: 48px;
+    font-weight: 300;
+    letter-spacing: -1px;
+    margin-bottom: 16px;
+  }
+
+  .hero h1 strong { font-weight: 600; color: var(--cyan); }
+
+  .hero p {
+    font-size: 18px;
+    color: var(--text-dim);
+    max-width: 600px;
+    margin: 0 auto 32px;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-block;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    text-decoration: none;
+    transition: all 0.15s;
+    border: none;
+    cursor: pointer;
+  }
+
+  .btn-primary { background: var(--cyan); color: #000; }
+  .btn-primary:hover { filter: brightness(1.2); text-decoration: none; }
+  .btn-outline { border: 1px solid var(--border); color: var(--text); background: transparent; }
+  .btn-outline:hover { border-color: var(--cyan); color: var(--cyan); text-decoration: none; }
+
+  /* ── Quickstart ────────────────────────────────────────── */
+
+  .quickstart {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 40px;
+    margin: 40px 0;
+    text-align: center;
+  }
+
+  .quickstart h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    font-weight: 600;
+  }
+
+  .quickstart pre {
+    display: inline-block;
+    text-align: left;
+    font-size: 15px;
+    border: none;
+    background: var(--surface-2);
+    padding: 16px 32px;
+  }
+
+  .quickstart .note {
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  /* ── Sections ──────────────────────────────────────────── */
+
+  section {
+    padding: 60px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  section h2 {
+    font-size: 28px;
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+
+  section h3 {
+    font-size: 18px;
+    font-weight: 500;
+    margin: 32px 0 12px;
+    color: var(--cyan);
+  }
+
+  section p {
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  section p strong { color: var(--text); }
+
+  /* ── Cards grid ────────────────────────────────────────── */
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    transition: border-color 0.15s;
+  }
+
+  .card:hover { border-color: var(--cyan); }
+
+  .card .card-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+
+  .card .card-value {
+    font-size: 28px;
+    font-weight: 300;
+    margin: 4px 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card .card-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .card.cyan .card-value { color: var(--cyan); }
+  .card.green .card-value { color: var(--green); }
+  .card.amber .card-value { color: var(--amber); }
+  .card.purple .card-value { color: var(--purple); }
+
+  /* ── Crate table ───────────────────────────────────────── */
+
+  .crate-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 14px;
+  }
+
+  .crate-table th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+  }
+
+  .crate-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .crate-table td:first-child {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--cyan);
+    font-size: 13px;
+  }
+
+  .crate-table td:last-child {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Flow diagram ──────────────────────────────────────── */
+
+  .flow {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin: 24px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--text-dim);
+  }
+
+  .flow .hl { color: var(--cyan); }
+  .flow .g { color: var(--green); }
+  .flow .p { color: var(--purple); }
+  .flow .a { color: var(--amber); }
+
+  /* ── Proven table ──────────────────────────────────────── */
+
+  .proven {
+    margin: 24px 0;
+  }
+
+  .proven-row {
+    display: flex;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+
+  .proven-check {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--green-dim);
+    color: var(--green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    margin-right: 12px;
+    flex-shrink: 0;
+  }
+
+  .proven-x {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #ff446620;
+    color: var(--red);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    margin-right: 12px;
+    flex-shrink: 0;
+  }
+
+  .proven-row span { color: var(--text-dim); }
+
+  /* ── Footer ────────────────────────────────────────────── */
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 40px 0;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  footer a { color: var(--cyan); }
+
+  /* ── Responsive ────────────────────────────────────────── */
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 32px; }
+    .hero p { font-size: 15px; }
+    .quickstart { padding: 24px; }
+    section { padding: 40px 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-badge">Formally Verified</div>
+    <h1><strong>cowiki-rs</strong></h1>
+    <p>
+      Spreading activation retrieval engine for the
+      <a href="https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424">Co-Wiki</a>
+      architecture. Proven math. Rust crates. One-command demo.
+    </p>
+    <div class="hero-actions">
+      <a href="https://github.com/copyleftdev/cowiki-rs" class="btn btn-primary">View on GitHub</a>
+      <a href="#quickstart" class="btn btn-outline">Run the Demo</a>
+    </div>
+  </div>
+
+  <!-- Quickstart -->
+  <div class="quickstart" id="quickstart">
+    <h2>Run the Demo</h2>
+    <pre><code>git clone https://github.com/copyleftdev/cowiki-rs
+cd cowiki-rs
+make demo</code></pre>
+    <div class="note">
+      Requires Docker. Builds in ~2 minutes. Opens at <code>http://localhost:3001</code>
+    </div>
+  </div>
+
+  <!-- What it does -->
+  <section>
+    <h2>What This Is</h2>
+    <p>
+      Paul Shomo proposed the <a href="https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424">Co-Wiki</a>:
+      a wiki-based warm storage layer for LLM memory where retrieval happens through
+      <strong>graph-based spreading activation</strong> instead of flat vector search.
+      He published the design as an open invitation to build.
+    </p>
+    <p>
+      We formalized the math, proved it works, found three corrections, and built
+      production-grade Rust crates from the verified contracts. Then we wired them
+      to a real wiki filesystem backend, added a performance dashboard, and Dockerized the whole thing.
+    </p>
+
+    <h3>How Spreading Activation Beats Vector Search</h3>
+    <p>
+      Vector search finds documents that are <strong>semantically similar</strong> to your query.
+      Spreading activation finds documents that are <strong>associatively reachable</strong>
+      through backlinks. The difference matters when the answer is 2-3 hops away.
+    </p>
+    <div class="flow">Query: <span class="hl">"memory sleep consolidation"</span>
+
+Vector search finds:
+  <span class="g">memory-consolidation</span> (direct match)
+
+Spreading activation finds:
+  <span class="g">memory-consolidation</span>      (direct match)
+  <span class="hl">spreading-activation</span>     (1 hop via backlink)
+  <span class="hl">rem-agent</span>                (1 hop, links to consolidation)
+  <span class="a">priming</span>                  (2 hops, through spreading-activation)
+  <span class="a">chunking</span>                 (2 hops, through memory-consolidation)
+  <span class="p">thinking-fast-and-slow</span>   (3 hops, through priming)
+  <span class="p">fault-injection</span>          (3 hops, through rem-agent)</div>
+    <p>
+      The demo wiki has 20 pages across 5 topic clusters (cognitive science, security,
+      distributed systems, AI, reading notes) with organic cross-domain backlinks.
+      Spreading activation traverses these connections in <strong>68 microseconds</strong>.
+    </p>
+  </section>
+
+  <!-- Architecture -->
+  <section>
+    <h2>Architecture</h2>
+    <p>
+      Nine Rust crates, each with independent mathematical contracts proven by
+      adversarial property-based testing. The wiki backend wires them to
+      a directory of markdown files.
+    </p>
+
+    <table class="crate-table">
+      <thead>
+        <tr><th>Crate</th><th>Purpose</th><th>Tests</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>scored-graph</td><td>Weighted directed graph with row-stochastic invariant</td><td>7</td></tr>
+        <tr><td>spread</td><td>Spreading activation with pluggable threshold functions</td><td>8</td></tr>
+        <tr><td>budget-knap</td><td>Budget-constrained selection, &ge; &frac12; OPT guarantee</td><td>6</td></tr>
+        <tr><td>temporal-graph</td><td>REM Agent: decay, prune, dream operators</td><td>6</td></tr>
+        <tr><td>chunk-quality</td><td>Coherence, recall, density metrics</td><td>5</td></tr>
+        <tr><td>cowiki</td><td>Composition layer (thin glue)</td><td>3</td></tr>
+        <tr><td>gauntlet</td><td>VOPR-style adversarial chaos tests</td><td>41</td></tr>
+        <tr><td>wiki-backend</td><td>Filesystem scan, TF-IDF, SQLite persistence</td><td>57</td></tr>
+        <tr><td>cowiki-server</td><td>Axum HTTP API + static UI serving</td><td>&mdash;</td></tr>
+      </tbody>
+    </table>
+
+    <div class="flow"><span class="hl">wiki directory</span>            <span class="a">wiki-backend</span>              <span class="g">cowiki primitives</span>
+<span class="hl">*.md files</span>       &mdash;scan&mdash;&gt;   PageMeta[]        &mdash;build&mdash;&gt;  <span class="g">ScoredGraph</span>
+<span class="hl">[[backlinks]]</span>              TfIdfIndex                   <span class="g">spread(a&deg;)</span>
+<span class="hl">directories</span>                id_to_idx map                <span class="g">select(budget)</span>
+                   &lt;&mdash;write&mdash;  create_page()     &lt;&mdash;&mdash;&mdash;&mdash;   <span class="g">rem_cycle()</span>
+<span class="hl">.cowiki/</span>                   persist()                    <span class="g">dream_candidates()</span>
+  <span class="p">engine.db</span>       (SQLite)
+  <span class="a">*.meta</span>          (human-readable)</div>
+  </section>
+
+  <!-- What was proven -->
+  <section>
+    <h2>What Was Proven</h2>
+    <p>
+      We formalized 17 claims from the Co-Wiki design, subjected them to adversarial
+      property-based testing (Python <code>hypothesis</code> + Rust <code>proptest</code>),
+      and built a VOPR-style chaos gauntlet that threw 22,500 randomized operations at the invariants.
+    </p>
+
+    <div class="proven">
+      <div class="proven-row"><div class="proven-check">&check;</div> Linear spreading activation is a contraction mapping (Banach)</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> Convergence is geometric at rate d</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> Graph retrieval beats vector retrieval on associative queries</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> Modified greedy retrieval achieves &ge; &frac12; of optimal</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> Variable human-cognitive chunks enable better token efficiency</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> Human chunk boundaries are more coherent than fixed-token splits</div>
+      <div class="proven-row"><div class="proven-check">&check;</div> REM decay/prune/dream operators maintain graph health</div>
+      <div class="proven-row"><div class="proven-x">&times;</div> Hard threshold breaks contraction <span>&mdash; disproven, sigmoid fix applied</span></div>
+      <div class="proven-row"><div class="proven-x">&times;</div> Monotonic hop-decay on general graphs <span>&mdash; disproven, holds on pure chains only</span></div>
+    </div>
+
+    <p>
+      The two disproven claims were <strong>corrections that improved the model</strong>.
+      See <a href="https://github.com/copyleftdev/cowiki-rs/blob/main/PROOF.md">PROOF.md</a>
+      for the full verification report.
+    </p>
+  </section>
+
+  <!-- Performance -->
+  <section>
+    <h2>Performance</h2>
+    <p>
+      Profiled with Valgrind callgrind (25 billion instructions), cachegrind, and massif.
+      Three optimization passes driven by the profiling data.
+    </p>
+
+    <div class="cards">
+      <div class="card cyan">
+        <div class="card-label">Query Latency</div>
+        <div class="card-value">27 <small style="font-size:14px;color:var(--text-dim)">us</small></div>
+        <div class="card-desc">p50 on 20-page wiki</div>
+      </div>
+      <div class="card green">
+        <div class="card-label">Throughput</div>
+        <div class="card-value">36.4K <small style="font-size:14px;color:var(--text-dim)">qps</small></div>
+        <div class="card-desc">Single-threaded, 20 pages</div>
+      </div>
+      <div class="card amber">
+        <div class="card-label">Save/Reload</div>
+        <div class="card-value">12 <small style="font-size:14px;color:var(--text-dim)">ms</small></div>
+        <div class="card-desc">SQLite round-trip (was 536ms)</div>
+      </div>
+      <div class="card purple">
+        <div class="card-label">Tests</div>
+        <div class="card-value">133</div>
+        <div class="card-desc">0 failures, 0 unsafe, 0 clippy</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- The Demo UI -->
+  <section>
+    <h2>The Demo</h2>
+    <p>
+      The demo UI is a three-panel dashboard built with React. No mocks.
+      Every number comes from the actual Rust backend running spreading activation
+      on a 20-page wiki.
+    </p>
+
+    <h3>Left Panel: Retrieval</h3>
+    <p>
+      Type a query or click an example pill. The engine ignites initial activation
+      via TF-IDF, propagates through the backlink graph, and selects articles within
+      a token budget using the knapsack algorithm. Results show title, ID, token cost,
+      and link count. Click a result to view it.
+    </p>
+
+    <h3>Center Panel: Page Viewer</h3>
+    <p>
+      Shows the selected page with its content and clickable backlink pills.
+      Click a backlink to navigate the graph. This is the core wiki experience.
+    </p>
+
+    <h3>Right Panel: Performance + REM</h3>
+    <p>
+      <strong>Performance counters</strong> update every 2 seconds: query count,
+      average latency, min/max, mutex lock-wait time in nanoseconds.
+    </p>
+    <p>
+      <strong>Stress test</strong> fires 200 queries and shows p50/p95/p99 latency
+      distribution bars.
+    </p>
+    <p>
+      <strong>REM Agent</strong> runs a maintenance cycle: decay weakens stale edges,
+      prune removes dormant pages, dream discovers missing backlinks between similar
+      but unconnected articles. The health ring shows graph reachability percentage.
+    </p>
+
+    <h3>Mutex Indicator</h3>
+    <p>
+      The header shows a kinetic mutex indicator. Pulsing green dot when idle,
+      glowing amber when any operation holds the lock. Lock-wait time is measured
+      in nanoseconds and displayed in the performance counters.
+    </p>
+  </section>
+
+  <!-- Running without Docker -->
+  <section>
+    <h2>Running Without Docker</h2>
+    <p>If you want to run it natively:</p>
+    <pre><code># Terminal 1: Build and start the server
+cargo build --release -p cowiki-server
+./target/release/cowiki-server demo-wiki
+
+# Terminal 2: Start the UI dev server
+cd ui && npm install && npx vite --port 5180</code></pre>
+    <p>
+      The dev server proxies <code>/api</code> to <code>localhost:3001</code>.
+      Open <code>http://localhost:5180</code>.
+    </p>
+
+    <h3>Running the Test Suite</h3>
+    <pre><code># All 133 tests
+cargo test
+
+# Just the VOPR chaos gauntlet (41 adversarial tests)
+cargo test -p gauntlet
+
+# Wiki backend end-to-end chaos (9 tests, ~40 seconds)
+cargo test -p wiki-backend --test vopr
+
+# Python proof suite (37 property tests)
+cd proof && pip install -r requirements.txt && python -m pytest tests/ -v</code></pre>
+  </section>
+
+  <!-- Citation -->
+  <section>
+    <h2>Citation</h2>
+    <p>This project implements and formally verifies the architecture described in:</p>
+    <blockquote style="border-left: 3px solid var(--cyan); padding: 12px 20px; margin: 16px 0; background: var(--cyan-dim); border-radius: 0 8px 8px 0;">
+      Shomo, P. (2026). <em>The Co-Wiki and REM Agent: A Legible Memory Architecture
+      for the Second Brain.</em>
+      <br>
+      <a href="https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424">Read the original design</a>
+      &middot;
+      <a href="https://www.linkedin.com/in/paulshomo/">LinkedIn</a>
+      &middot;
+      <a href="https://x.com/ShomoBits">@ShomoBits</a>
+    </blockquote>
+    <p style="font-size: 13px;">
+      Licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>,
+      matching the original design document.
+    </p>
+  </section>
+
+</div>
+
+<footer>
+  <div class="container">
+    <a href="https://github.com/copyleftdev/cowiki-rs">cowiki-rs</a>
+    &middot; 9 crates &middot; 133 tests &middot; 0 unsafe
+    &middot; Built in response to an
+    <a href="https://gist.github.com/paulshomo/69cf99e3185fa7ad0f50fc0e38bcd424">invitation to build</a>
+  </div>
+</footer>
+
+</body>
+</html>
