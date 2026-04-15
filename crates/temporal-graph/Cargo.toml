@@ -1,0 +1,12 @@
+[package]
+name = "temporal-graph"
+version = "0.1.0"
+edition = "2024"
+description = "Temporal graph dynamics: decay, prune, dream operators (REM agent)"
+
+[dependencies]
+scored-graph = { path = "../scored-graph" }
+spread = { path = "../spread" }
+
+[dev-dependencies]
+proptest = { workspace = true }

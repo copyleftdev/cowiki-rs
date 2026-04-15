@@ -1,0 +1,10 @@
+[package]
+name = "chunk-quality"
+version = "0.1.0"
+edition = "2024"
+description = "Chunk coherence and density metrics for retrieval evaluation"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }

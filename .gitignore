@@ -1,0 +1,6 @@
+/target
+__pycache__/
+*.pyc
+.pytest_cache/
+proof/.pytest_cache/
+.hypothesis/

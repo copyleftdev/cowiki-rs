@@ -1,0 +1,10 @@
+[package]
+name = "scored-graph"
+version = "0.1.0"
+edition = "2024"
+description = "Weighted directed graph with node costs and row-stochastic normalization"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }

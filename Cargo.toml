@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scored-graph",
+    "crates/spread",
+    "crates/budget-knap",
+    "crates/temporal-graph",
+    "crates/chunk-quality",
+    "crates/cowiki",
+    "crates/gauntlet",
+]
+
+[workspace.dependencies]
+proptest = "1"

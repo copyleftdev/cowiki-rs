@@ -1,0 +1,10 @@
+[package]
+name = "budget-knap"
+version = "0.1.0"
+edition = "2024"
+description = "Budget-constrained selection with >= 1/2 OPT guarantee"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }

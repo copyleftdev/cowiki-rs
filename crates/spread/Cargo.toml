@@ -1,0 +1,11 @@
+[package]
+name = "spread"
+version = "0.1.0"
+edition = "2024"
+description = "Spreading activation on weighted directed graphs with convergence guarantees"
+
+[dependencies]
+scored-graph = { path = "../scored-graph" }
+
+[dev-dependencies]
+proptest = { workspace = true }

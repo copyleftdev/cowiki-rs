@@ -1,0 +1,16 @@
+[package]
+name = "gauntlet"
+version = "0.1.0"
+edition = "2024"
+description = "VOPR-inspired adversarial test suite for cowiki primitives"
+
+[dependencies]
+scored-graph = { path = "../scored-graph" }
+spread = { path = "../spread" }
+budget-knap = { path = "../budget-knap" }
+temporal-graph = { path = "../temporal-graph" }
+chunk-quality = { path = "../chunk-quality" }
+cowiki = { path = "../cowiki" }
+
+[dev-dependencies]
+proptest = { workspace = true }
