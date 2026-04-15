@@ -63,6 +63,19 @@ export default function App() {
   const [newContent, setNewContent] = useState('')
   const perfInterval = useRef(null)
 
+  const exampleQueries = [
+    { label: 'memory + sleep', query: 'memory sleep consolidation' },
+    { label: 'attack vectors', query: 'vulnerability dependency attack' },
+    { label: 'graph trust', query: 'graph traversal trust' },
+    { label: 'cognitive priming', query: 'priming associative activation' },
+    { label: 'consensus', query: 'distributed consensus partition' },
+    { label: 'chunk retrieval', query: 'chunking knapsack budget density' },
+    { label: 'threat model', query: 'threat model attack surface' },
+    { label: 'REM dreaming', query: 'rem decay prune dream maintenance' },
+    { label: 'Kahneman', query: 'system fast slow thinking' },
+    { label: 'DDIA', query: 'replication consistency data' },
+  ]
+
   const refresh = useCallback(async () => {
     const [p, s, pf] = await Promise.all([listPages(), getStats(), getPerf()])
     setPages(p)
@@ -160,6 +173,26 @@ export default function App() {
           <button className="btn btn-primary" onClick={handleQuery} disabled={busy}>
             Spread
           </button>
+        </div>
+
+        <div className="example-queries">
+          {exampleQueries.map(eq => (
+            <button
+              key={eq.label}
+              className="example-pill"
+              onClick={() => {
+                setQuery(eq.query)
+                setBusy(true)
+                queryPages(eq.query).then(r => {
+                  setResults(r)
+                  setBusy(false)
+                  getPerf().then(setPerf)
+                })
+              }}
+            >
+              {eq.label}
+            </button>
+          ))}
         </div>
 
         {results && (
