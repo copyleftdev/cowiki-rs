@@ -8,6 +8,7 @@ members = [
     "crates/chunk-quality",
     "crates/cowiki",
     "crates/gauntlet",
+    "crates/wiki-backend",
 ]
 
 [workspace.dependencies]
