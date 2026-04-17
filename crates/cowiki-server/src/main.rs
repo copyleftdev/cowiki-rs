@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
+
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,7 +34,7 @@ use wiki_backend::WikiBackend;
 // deployment; a multi-tenant variant would push corpus into the request path.
 
 struct Inner {
-    corpora: BTreeMap<String, Mutex<WikiBackend>>,
+    corpora: BTreeMap<String, RwLock<WikiBackend>>,
     active: RwLock<String>,
     counters: Counters,
 }
@@ -85,16 +87,33 @@ impl Counters {
 
 type AppState = Arc<Inner>;
 
-/// Acquire a lock on the currently-active corpus and record lock-wait time.
-/// The guard lifetime is tied to `&Inner` so the caller can hold it safely.
-fn acquire_wiki(state: &Inner) -> std::sync::MutexGuard<'_, WikiBackend> {
-    let active = state.active.read().unwrap().clone();
-    let mutex = state
+/// Resolve the currently-active corpus to its RwLock. The BTreeMap only grows
+/// (corpora are registered at startup; `select_corpus` cannot remove entries),
+/// so a cloned name is always findable.
+fn active_lock(state: &Inner) -> &RwLock<WikiBackend> {
+    let active = state.active.read().clone();
+    state
         .corpora
         .get(&active)
-        .expect("active corpus must be registered");
+        .expect("active corpus must be registered")
+}
+
+/// Shared-read guard on the active corpus. Use from endpoints that only read
+/// the graph / metadata / TF-IDF (query, list, stats, neighborhood, get_page).
+fn acquire_wiki(state: &Inner) -> RwLockReadGuard<'_, WikiBackend> {
+    let lock = active_lock(state);
     let t = Instant::now();
-    let guard = mutex.lock().unwrap();
+    let guard = lock.read();
+    state.counters.record_lock(t.elapsed().as_nanos() as u64);
+    guard
+}
+
+/// Exclusive-write guard on the active corpus. Use from endpoints that mutate
+/// the wiki (create_page, maintain).
+fn acquire_wiki_mut(state: &Inner) -> RwLockWriteGuard<'_, WikiBackend> {
+    let lock = active_lock(state);
+    let t = Instant::now();
+    let guard = lock.write();
     state.counters.record_lock(t.elapsed().as_nanos() as u64);
     guard
 }
@@ -262,20 +281,34 @@ async fn get_page(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PageDetail>, StatusCode> {
-    let wiki = acquire_wiki(&state);
-    let meta = wiki.page(&PageId(id)).ok_or(StatusCode::NOT_FOUND)?;
+    // Take a snapshot of the metadata we need, then drop the lock before
+    // touching the disk. Otherwise every reader queues behind file I/O.
+    let (full_path, detail_template) = {
+        let wiki = acquire_wiki(&state);
+        let meta = wiki.page(&PageId(id)).ok_or(StatusCode::NOT_FOUND)?;
+        let full = wiki.root().join(&meta.path);
+        let tmpl = PageDetail {
+            id: meta.id.0.clone(),
+            title: meta.title.clone(),
+            content: String::new(),
+            links_to: meta.links_to.iter().map(|l| l.0.clone()).collect(),
+            token_cost: meta.token_cost,
+        };
+        (full, tmpl)
+    };
 
-    // Resolve relative path through wiki root.
-    let content = std::fs::read_to_string(wiki.root().join(&meta.path))
-        .unwrap_or_default();
+    // Content file absent while metadata exists means the index and disk have
+    // diverged — surface it rather than returning an empty string behind 200.
+    let content = std::fs::read_to_string(&full_path).map_err(|e| {
+        eprintln!(
+            "get_page: content missing for {} at {}: {e}",
+            detail_template.id,
+            full_path.display(),
+        );
+        StatusCode::BAD_GATEWAY
+    })?;
 
-    Ok(Json(PageDetail {
-        id: meta.id.0.clone(),
-        title: meta.title.clone(),
-        content,
-        links_to: meta.links_to.iter().map(|l| l.0.clone()).collect(),
-        token_cost: meta.token_cost,
-    }))
+    Ok(Json(PageDetail { content, ..detail_template }))
 }
 
 async fn query_pages(
@@ -309,38 +342,54 @@ async fn create_page_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePageRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut wiki = acquire_wiki(&state);
+    let mut wiki = acquire_wiki_mut(&state);
+    let id = req.id.clone();
     wiki.create_page(&PageId(req.id), &req.title, &req.content)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    wiki.save().ok();
+        .map_err(|e| {
+            eprintln!("create_page: write failed for {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    // Persistence failures are not recoverable from the client's perspective —
+    // the in-memory graph advanced but disk state didn't. Surface it.
+    wiki.save().map_err(|e| {
+        eprintln!("create_page: save failed for {id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     state.counters.creates.fetch_add(1, Ordering::Relaxed);
     Ok(StatusCode::CREATED)
 }
 
-async fn maintain_handler(State(state): State<AppState>) -> Json<MaintainResponse> {
+async fn maintain_handler(
+    State(state): State<AppState>,
+) -> Result<Json<MaintainResponse>, StatusCode> {
     let t = Instant::now();
-    let mut wiki = acquire_wiki(&state);
+    let mut wiki = acquire_wiki_mut(&state);
     let report = wiki.maintain_with_dream(&RemConfig::default());
 
-    let dreamed_edges: Vec<[String; 2]> = report.dreamed_edges.iter()
-        .filter_map(|&(src, dst)| {
-            let pages = wiki.all_pages();
-            Some([pages.get(src)?.id.0.clone(), pages.get(dst)?.id.0.clone()])
-        })
-        .collect();
+    let dreamed_edges: Vec<[String; 2]> = {
+        let pages = wiki.all_pages();
+        report.dreamed_edges.iter()
+            .filter_map(|&(src, dst)| {
+                Some([pages.get(src)?.id.0.clone(), pages.get(dst)?.id.0.clone()])
+            })
+            .collect()
+    };
 
-    wiki.save().ok();
+    wiki.save().map_err(|e| {
+        eprintln!("maintain: save failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     drop(wiki);
     let elapsed_us = t.elapsed().as_micros() as u64;
     state.counters.record_maintain(elapsed_us);
 
-    Json(MaintainResponse {
+    Ok(Json(MaintainResponse {
         health: report.health,
         pruned_count: report.pruned.len(),
         dreamed_count: dreamed_edges.len(),
         dreamed_edges,
         elapsed_us,
-    })
+    }))
 }
 
 async fn neighborhood_handler(
@@ -491,10 +540,10 @@ async fn ssr_article_handler(
     Path((corpus, id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(mutex) = state.corpora.get(&corpus) else {
+    let Some(lock) = state.corpora.get(&corpus) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let wiki = mutex.lock().unwrap();
+    let wiki = lock.read();
     let base = base_url(&headers);
     match ssr::render_article(&wiki, &corpus, &id, &base) {
         Some(html) => Html(html).into_response(),
@@ -507,10 +556,10 @@ async fn ssr_corpus_handler(
     Path(corpus): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(mutex) = state.corpora.get(&corpus) else {
+    let Some(lock) = state.corpora.get(&corpus) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let wiki = mutex.lock().unwrap();
+    let wiki = lock.read();
     let base = base_url(&headers);
     Html(ssr::render_corpus(&wiki, &corpus, &base)).into_response()
 }
@@ -536,12 +585,12 @@ async fn robots_handler(headers: HeaderMap) -> Response {
 }
 
 async fn list_corpora(State(state): State<AppState>) -> Json<Vec<CorpusSummary>> {
-    let active = state.active.read().unwrap().clone();
+    let active = state.active.read().clone();
     let out: Vec<CorpusSummary> = state
         .corpora
         .iter()
-        .map(|(name, mutex)| {
-            let wiki = mutex.lock().unwrap();
+        .map(|(name, lock)| {
+            let wiki = lock.read();
             let g = wiki.graph();
             let n = g.len();
             let (_, _, values) = g.adj_transpose_csr();
@@ -566,7 +615,7 @@ async fn select_corpus(
     if !state.corpora.contains_key(&req.name) {
         return Err(StatusCode::NOT_FOUND);
     }
-    *state.active.write().unwrap() = req.name;
+    *state.active.write() = req.name;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -637,11 +686,43 @@ async fn stress_handler(
         avg_us: total as f64 / n as f64,
         min_us: latencies[0],
         max_us: latencies[n - 1],
-        p50_us: latencies[n / 2],
-        p95_us: latencies[n * 95 / 100],
-        p99_us: latencies[n * 99 / 100],
+        p50_us: percentile(&latencies, 50),
+        p95_us: percentile(&latencies, 95),
+        p99_us: percentile(&latencies, 99),
         throughput_qps: n as f64 / (total as f64 / 1_000_000.0),
     })
+}
+
+/// Nearest-rank percentile: index = ceil(p/100 · n) − 1, clamped.
+/// Preconditions: `sorted` is non-empty and ascending; `p ≤ 100`.
+fn percentile(sorted: &[u64], p: usize) -> u64 {
+    let n = sorted.len();
+    let idx = ((p * n + 99) / 100).saturating_sub(1).min(n - 1);
+    sorted[idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percentile;
+
+    #[test]
+    fn percentile_nearest_rank() {
+        // 100 sorted samples: p99 is the 99th ordinal (index 98), not the max.
+        let v: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile(&v, 50), 50);
+        assert_eq!(percentile(&v, 95), 95);
+        assert_eq!(percentile(&v, 99), 99);
+        assert_eq!(percentile(&v, 100), 100);
+    }
+
+    #[test]
+    fn percentile_small_n() {
+        assert_eq!(percentile(&[42], 50), 42);
+        assert_eq!(percentile(&[42], 99), 42);
+        // n=2 ascending: p50 is the lower sample, p99 the upper — not both the max.
+        assert_eq!(percentile(&[10, 20], 50), 10);
+        assert_eq!(percentile(&[10, 20], 99), 20);
+    }
 }
 
 // ─── Simulation (SSE) ────────────────────────────────────────────────────────
@@ -704,7 +785,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut corpora: BTreeMap<String, Mutex<WikiBackend>> = BTreeMap::new();
+    let mut corpora: BTreeMap<String, RwLock<WikiBackend>> = BTreeMap::new();
     for root in &roots {
         if !root.exists() {
             eprintln!("Directory does not exist: {}", root.display());
@@ -725,7 +806,7 @@ async fn main() {
             eprintln!("  duplicate corpus name '{name}' — skipping");
             continue;
         }
-        corpora.insert(name, Mutex::new(wiki));
+        corpora.insert(name, RwLock::new(wiki));
     }
 
     // Default active: the first corpus in alphabetical order (BTreeMap's natural order).

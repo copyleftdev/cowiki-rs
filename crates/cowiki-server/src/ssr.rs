@@ -12,7 +12,7 @@
 //! here from a search result back to the SPA.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use parking_lot::RwLock;
 
 use wiki_backend::types::PageId;
 use wiki_backend::WikiBackend;
@@ -567,7 +567,7 @@ pub fn render_corpus(backend: &WikiBackend, corpus: &str, base_url: &str) -> Str
 // ── Sitemap.xml ─────────────────────────────────────────────────────────────
 
 pub fn render_sitemap(
-    corpora: &BTreeMap<String, Mutex<WikiBackend>>,
+    corpora: &BTreeMap<String, RwLock<WikiBackend>>,
     base_url: &str,
 ) -> String {
     let mut out = String::from(
@@ -580,8 +580,8 @@ pub fn render_sitemap(
         base = base_url
     ));
     // Corpus landing pages + articles
-    for (name, mutex) in corpora {
-        let wiki = mutex.lock().unwrap();
+    for (name, lock) in corpora {
+        let wiki = lock.read();
         let corpus_enc = enc(name);
         out.push_str(&format!(
             "  <url><loc>{base}/c/{c}</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>\n",

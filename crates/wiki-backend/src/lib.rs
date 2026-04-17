@@ -260,6 +260,12 @@ impl WikiBackend {
         &self.graph
     }
 
+    /// Compute initial activation `a⁰` for a text query from this wiki's TF-IDF index.
+    /// Exposed for auditing and tooling (replay the pipeline component-by-component).
+    pub fn ignite(&self, query: &str) -> Vec<f64> {
+        tfidf::ignite(&self.tfidf, query)
+    }
+
     /// Full rebuild from disk. Called after writes.
     fn rebuild(&mut self) -> Result<(), WikiError> {
         let new = Self::open(&self.root)?;
