@@ -80,31 +80,54 @@ pub fn build_index(contents: &[String]) -> TfIdfIndex {
 
 /// Compute initial activation `a⁰` from a text query.
 ///
-/// Uses precomputed dense vectors and norms — no per-query allocation
-/// for document vectors, no HashMap lookups during the hot loop.
+/// The query has a handful of terms; each document vector is ~|vocab|
+/// dimensions. Expanding the query to dense would force O(|vocab|) work
+/// per document — at Wikipedia scale that is ~50k × n_docs, catastrophic.
+///
+/// Instead we keep the query sparse: resolve each term to its vocab
+/// index once, then each document's dot product touches only those
+/// slots. Complexity: O(|query terms| × n_docs).
 pub fn ignite(index: &TfIdfIndex, query: &str) -> Vec<f64> {
     let query_tf = query_tfidf(index, query);
-    let query_dense = sparse_to_dense(&query_tf, &index.vocab_idx);
-    let query_norm = l2_norm(&query_dense);
+    if query_tf.is_empty() {
+        return vec![0.0; index.n_docs];
+    }
 
+    // Sparse query: (vocab_idx, weight) per resolvable term.
+    let mut query_sparse: Vec<(usize, f64)> = query_tf.iter()
+        .filter_map(|(term, &w)| index.vocab_idx.get(term).map(|&i| (i, w)))
+        .collect();
+    if query_sparse.is_empty() {
+        return vec![0.0; index.n_docs];
+    }
+
+    let query_norm: f64 = query_sparse.iter().map(|(_, w)| w * w).sum::<f64>().sqrt();
     if query_norm == 0.0 {
         return vec![0.0; index.n_docs];
     }
 
-    // Hot loop: dot product against precomputed dense vectors.
+    // Sort by vocab_idx for cache-friendly doc access.
+    query_sparse.sort_unstable_by_key(|(i, _)| *i);
+
     index.dense.iter().zip(index.norms.iter()).map(|(doc, &doc_norm)| {
         if doc_norm == 0.0 {
             0.0
         } else {
-            dot(&query_dense, doc) / (query_norm * doc_norm)
+            let mut s = 0.0;
+            for &(i, qw) in &query_sparse {
+                s += qw * doc[i];
+            }
+            s / (query_norm * doc_norm)
         }
     }).collect()
 }
 
 /// Content similarity between pages `i` and `j`.
 ///
-/// Uses precomputed dense vectors and norms — O(vocab_size) with
-/// no allocation, no hashing.
+/// Sparse intersection: iterate the shorter document's terms and probe the
+/// longer one. O(min(|doc_i|, |doc_j|)) instead of O(|vocab|) — at Wikipedia
+/// scale (vocab ~50k, docs ~500 terms) this is 100× faster per call, which
+/// matters because `dream_candidates` fires this in a tight loop.
 pub fn similarity(index: &TfIdfIndex, i: usize, j: usize) -> f64 {
     if i >= index.n_docs || j >= index.n_docs {
         return 0.0;
@@ -114,7 +137,18 @@ pub fn similarity(index: &TfIdfIndex, i: usize, j: usize) -> f64 {
     if norm_i == 0.0 || norm_j == 0.0 {
         return 0.0;
     }
-    dot(&index.dense[i], &index.dense[j]) / (norm_i * norm_j)
+    let (small, big) = if index.vectors[i].len() <= index.vectors[j].len() {
+        (&index.vectors[i], &index.vectors[j])
+    } else {
+        (&index.vectors[j], &index.vectors[i])
+    };
+    let mut s = 0.0;
+    for (term, &w_a) in small {
+        if let Some(&w_b) = big.get(term) {
+            s += w_a * w_b;
+        }
+    }
+    s / (norm_i * norm_j)
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -162,10 +196,6 @@ fn sparse_to_dense(sparse: &HashMap<String, f64>, vocab_idx: &HashMap<String, us
         }
     }
     dense
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 fn l2_norm(v: &[f64]) -> f64 {

@@ -146,11 +146,32 @@ pub fn prune_candidates(state: &TemporalState, threshold: f64, window: usize) ->
     prunable
 }
 
+/// Upper bound on pair checks in one dream pass. Prevents an O(n²) blow-up
+/// at Wikipedia scale (where n² × similarity_cost becomes minutes of held
+/// lock). With sparse similarity averaging ~5 µs/call, this caps dream at
+/// ~50 ms per cycle regardless of graph size.
+const DREAM_MAX_PAIRS: usize = 10_000;
+
+/// Activation floor used to decide whether a node was "recently thought
+/// about" and therefore eligible for dream consolidation.
+const DREAM_RECENT_FLOOR: f64 = 0.005;
+
 /// Discover new edges between nodes whose similarity exceeds `threshold`
 /// but have no existing edge.
 ///
 /// The `similarity` closure is called for each candidate pair and should
 /// return a score in [0, 1].
+///
+/// ## Candidate selection
+///
+/// For small graphs (n² ≤ `DREAM_MAX_PAIRS`) this checks every alive pair,
+/// preserving the original semantics on which the proof-suite properties
+/// P6.5–P6.6 are verified.
+///
+/// For large graphs it restricts to the set of nodes activated above
+/// `DREAM_RECENT_FLOOR` in the most recent cycle — the biological
+/// analogue (you consolidate what you've been thinking about) — and falls
+/// back to a deterministic stride sample if the activation history is empty.
 ///
 /// ## Proven properties (P6.5–P6.6)
 /// - Discovers edges between similar unconnected nodes
@@ -167,13 +188,51 @@ where
     let n = graph.len();
     let mut new_edges = Vec::new();
 
-    for i in 0..n {
-        if !state.alive[i] { continue; }
-        for j in 0..n {
-            if i == j || !state.alive[j] { continue; }
-            if graph.raw_weight(i, j) > 0.0 { continue; }
-            if similarity(i, j) > threshold {
-                new_edges.push((i, j));
+    let check_pair = |i: usize, j: usize, out: &mut Vec<(usize, usize)>| {
+        if i == j { return; }
+        if !state.alive[i] || !state.alive[j] { return; }
+        if graph.raw_weight(i, j) > 0.0 { return; }
+        if similarity(i, j) > threshold {
+            out.push((i, j));
+        }
+    };
+
+    // Fast path: small enough graphs use full O(n²) sweep so small-graph
+    // invariants in the proof suite stay intact.
+    if n.saturating_mul(n) <= DREAM_MAX_PAIRS {
+        for i in 0..n {
+            for j in 0..n {
+                check_pair(i, j, &mut new_edges);
+            }
+        }
+        return new_edges;
+    }
+
+    // Scaled path: operate over recently-activated nodes.
+    let candidates: Vec<usize> = if let Some(last) = state.activation_history.last() {
+        (0..n)
+            .filter(|&i| state.alive[i] && last.get(i).copied().unwrap_or(0.0) > DREAM_RECENT_FLOOR)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Fallback when there's no activation history yet: deterministic stride
+    // sample so the operator is still exercised on a cold graph.
+    let candidates = if candidates.is_empty() {
+        let stride = (n / 128).max(1);
+        (0..n).step_by(stride).filter(|&i| state.alive[i]).collect::<Vec<_>>()
+    } else {
+        candidates
+    };
+
+    let mut checked = 0usize;
+    'outer: for &i in &candidates {
+        for &j in &candidates {
+            check_pair(i, j, &mut new_edges);
+            checked += 1;
+            if checked >= DREAM_MAX_PAIRS {
+                break 'outer;
             }
         }
     }

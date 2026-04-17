@@ -21,6 +21,12 @@
 use std::collections::VecDeque;
 
 /// A weighted directed graph with row-stochastic adjacency and per-node costs.
+///
+/// Keeps both a dense adjacency (for random access, persistence, neighborhood
+/// queries) and a CSR-encoded transpose (`Wᵀ`) for the spreading activation
+/// hot loop — the operator is `T(a) = (1-d)·a⁰ + d·Wᵀ·f(a)`, so iterating by
+/// columns of W (== rows of Wᵀ) against sparse edges is the cache-friendly,
+/// arithmetic-minimal form.
 #[derive(Debug, Clone)]
 pub struct ScoredGraph {
     /// Number of nodes.
@@ -29,6 +35,11 @@ pub struct ScoredGraph {
     raw: Vec<f64>,
     /// Row-stochastic adjacency: `adj[i * n + j]` = `raw[i,j] / Σ_k raw[i,k]`.
     adj: Vec<f64>,
+    /// CSR transpose of `adj`: rows are columns of W. `adj_t_row_ptr[j+1] - adj_t_row_ptr[j]`
+    /// is the in-degree of node j.
+    adj_t_row_ptr: Vec<usize>,
+    adj_t_col_idx: Vec<usize>,
+    adj_t_values:  Vec<f64>,
     /// Token cost per node. Must be > 0 for all nodes.
     costs: Vec<u64>,
     /// Category bitset per node (simple: just a `Vec<u64>` used as a bitfield).
@@ -56,11 +67,15 @@ impl ScoredGraph {
         }
 
         let adj = row_stochastize(&raw, n);
+        let (adj_t_row_ptr, adj_t_col_idx, adj_t_values) = build_csr_transpose(&adj, n);
 
         Self {
             n,
             raw,
             adj,
+            adj_t_row_ptr,
+            adj_t_col_idx,
+            adj_t_values,
             costs,
             categories: vec![0; n],
         }
@@ -116,6 +131,15 @@ impl ScoredGraph {
         &self.adj
     }
 
+    /// CSR-encoded transpose of the row-stochastic adjacency. Tuple is
+    /// `(row_ptr, col_idx, values)` where for column `j` of W (row `j` of Wᵀ):
+    /// `col_idx[row_ptr[j]..row_ptr[j+1]]` are source node indices and
+    /// `values[...]` are the edge weights. Sized by edge count, not n².
+    #[inline]
+    pub fn adj_transpose_csr(&self) -> (&[usize], &[usize], &[f64]) {
+        (&self.adj_t_row_ptr, &self.adj_t_col_idx, &self.adj_t_values)
+    }
+
     /// Full raw weight matrix as a flat slice (row-major).
     #[inline]
     pub fn raw_matrix(&self) -> &[f64] {
@@ -129,9 +153,14 @@ impl ScoredGraph {
         &mut self.raw
     }
 
-    /// Recompute the row-stochastic adjacency from current raw weights.
+    /// Recompute the row-stochastic adjacency from current raw weights and
+    /// rebuild the CSR transpose sidecar.
     pub fn renormalize(&mut self) {
         self.adj = row_stochastize(&self.raw, self.n);
+        let (rp, ci, v) = build_csr_transpose(&self.adj, self.n);
+        self.adj_t_row_ptr = rp;
+        self.adj_t_col_idx = ci;
+        self.adj_t_values  = v;
     }
 
     /// Outgoing neighbors of node `v` (nodes that `v` links to).
@@ -195,6 +224,48 @@ fn row_stochastize(raw: &[f64], n: usize) -> Vec<f64> {
         }
     }
     adj
+}
+
+/// Build a CSR representation of the transpose of the dense adjacency:
+/// rows of Wᵀ == columns of W. The hot spreading-activation loop reduces
+/// `next[j] = Σ_i W[i][j] · f(a[i])` which is exactly a row-sweep in Wᵀ.
+///
+/// Returns `(row_ptr[n+1], col_idx[nnz], values[nnz])`.
+fn build_csr_transpose(adj: &[f64], n: usize) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    if n == 0 {
+        return (vec![0], Vec::new(), Vec::new());
+    }
+    // Count non-zeros per column of W.
+    let mut col_counts = vec![0usize; n];
+    for i in 0..n {
+        let row = &adj[i * n..(i + 1) * n];
+        for (j, &w) in row.iter().enumerate() {
+            if w > 0.0 {
+                col_counts[j] += 1;
+            }
+        }
+    }
+    // Exclusive prefix sum → row_ptr for Wᵀ.
+    let mut row_ptr = vec![0usize; n + 1];
+    for j in 0..n {
+        row_ptr[j + 1] = row_ptr[j] + col_counts[j];
+    }
+    let nnz = row_ptr[n];
+    let mut col_idx = vec![0usize; nnz];
+    let mut values  = vec![0.0f64; nnz];
+    let mut fill    = vec![0usize; n];
+    for i in 0..n {
+        let row = &adj[i * n..(i + 1) * n];
+        for (j, &w) in row.iter().enumerate() {
+            if w > 0.0 {
+                let p = row_ptr[j] + fill[j];
+                col_idx[p] = i;
+                values[p]  = w;
+                fill[j] += 1;
+            }
+        }
+    }
+    (row_ptr, col_idx, values)
 }
 
 #[cfg(test)]

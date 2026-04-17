@@ -7,6 +7,18 @@ export const getPage = id => safe(fetch(`${API}/pages/${id}`).then(r => r.ok ? r
 export const getStats = () => safe(fetch(`${API}/stats`).then(r => r.json()), null)
 export const getPerf = () => safe(fetch(`${API}/perf`).then(r => r.json()), null)
 
+export const getCorpora = () => safe(fetch(`${API}/corpora`).then(r => r.json()), [])
+
+export const selectCorpus = name =>
+  fetch(`${API}/corpora/select`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  }).then(r => r.ok)
+
+export const getNeighborhood = id =>
+  safe(fetch(`${API}/neighborhood/${encodeURI(id)}`).then(r => r.ok ? r.json() : null), null)
+
 export const queryPages = (query, budget = 4000) =>
   fetch(`${API}/query`, {
     method: 'POST',

@@ -1,14 +1,17 @@
 mod simulate;
+mod ssr;
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use axum::extract::{Path, Query as AxumQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
@@ -21,9 +24,16 @@ use wiki_backend::types::PageId;
 use wiki_backend::WikiBackend;
 
 // ─── Shared state ────────────────────────────────────────────────────────────
+//
+// The server can host multiple corpora simultaneously. One is marked active;
+// all operational endpoints (query, pages, neighborhood, maintain, stress,
+// simulate) route to it. The UI switches corpus via POST /api/corpora/select
+// which is effectively a global toggle — fine for a single-user workstation
+// deployment; a multi-tenant variant would push corpus into the request path.
 
 struct Inner {
-    wiki: Mutex<WikiBackend>,
+    corpora: BTreeMap<String, Mutex<WikiBackend>>,
+    active: RwLock<String>,
     counters: Counters,
 }
 
@@ -75,10 +85,16 @@ impl Counters {
 
 type AppState = Arc<Inner>;
 
-/// Acquire the wiki lock and record lock-wait time.
+/// Acquire a lock on the currently-active corpus and record lock-wait time.
+/// The guard lifetime is tied to `&Inner` so the caller can hold it safely.
 fn acquire_wiki(state: &Inner) -> std::sync::MutexGuard<'_, WikiBackend> {
+    let active = state.active.read().unwrap().clone();
+    let mutex = state
+        .corpora
+        .get(&active)
+        .expect("active corpus must be registered");
     let t = Instant::now();
-    let guard = state.wiki.lock().unwrap();
+    let guard = mutex.lock().unwrap();
     state.counters.record_lock(t.elapsed().as_nanos() as u64);
     guard
 }
@@ -151,6 +167,44 @@ struct StatsResponse {
     page_count: usize,
     edge_count: usize,
     density: f64,
+}
+
+#[derive(Serialize)]
+struct CorpusSummary {
+    name: String,
+    page_count: usize,
+    edge_count: usize,
+    density: f64,
+    active: bool,
+}
+
+#[derive(Deserialize)]
+struct SelectCorpusRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct NeighborNode {
+    id: String,
+    title: String,
+    token_cost: u64,
+    hops: u32,
+    direction: &'static str,
+}
+
+#[derive(Serialize)]
+struct NeighborEdge {
+    from: String,
+    to: String,
+    weight: f64,
+}
+
+#[derive(Serialize)]
+struct NeighborhoodResponse {
+    center: String,
+    nodes: Vec<NeighborNode>,
+    edges: Vec<NeighborEdge>,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -289,18 +343,241 @@ async fn maintain_handler(State(state): State<AppState>) -> Json<MaintainRespons
     })
 }
 
+async fn neighborhood_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<NeighborhoodResponse>, StatusCode> {
+    const MAX_NODES: usize = 48;
+
+    let wiki = acquire_wiki(&state);
+    let pages = wiki.all_pages();
+    let g = wiki.graph();
+    let n = g.len();
+
+    let center = pages
+        .iter()
+        .position(|p| p.id.0 == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // BFS out to depth 2 treating the graph as undirected (associative reach
+    // is what we want to surface — direction is encoded per-node separately).
+    let mut hops: Vec<Option<u32>> = vec![None; n];
+    hops[center] = Some(0);
+    let mut frontier = vec![center];
+    for depth in 1..=2u32 {
+        let mut next = Vec::new();
+        for &i in &frontier {
+            for j in 0..n {
+                if hops[j].is_some() {
+                    continue;
+                }
+                if g.raw_weight(i, j) > 0.0 || g.raw_weight(j, i) > 0.0 {
+                    hops[j] = Some(depth);
+                    next.push(j);
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    // Classify direction relative to the center.
+    let direction_of = |i: usize| -> &'static str {
+        if i == center {
+            return "center";
+        }
+        let out = g.raw_weight(center, i) > 0.0;
+        let inb = g.raw_weight(i, center) > 0.0;
+        match (out, inb) {
+            (true, true) => "both",
+            (true, false) => "out",
+            (false, true) => "in",
+            (false, false) => "indirect",
+        }
+    };
+
+    // Build node list with min-hop tracking.
+    let mut reached: Vec<(usize, u32)> = (0..n)
+        .filter_map(|i| hops[i].map(|h| (i, h)))
+        .collect();
+
+    // Cap: keep center + all 1-hop + best 2-hop by edge weight to any 1-hop node.
+    let truncated = reached.len() > MAX_NODES;
+    if truncated {
+        let one_hop_idxs: std::collections::HashSet<usize> =
+            reached.iter().filter(|(_, h)| *h == 1).map(|(i, _)| *i).collect();
+        let score_2hop = |i: usize| -> f64 {
+            one_hop_idxs
+                .iter()
+                .map(|&j| g.raw_weight(i, j).max(g.raw_weight(j, i)))
+                .fold(0.0_f64, f64::max)
+        };
+        reached.sort_by(|a, b| {
+            a.1.cmp(&b.1).then_with(|| {
+                score_2hop(b.0)
+                    .partial_cmp(&score_2hop(a.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        reached.truncate(MAX_NODES);
+    }
+
+    let nodes: Vec<NeighborNode> = reached
+        .iter()
+        .filter_map(|&(i, h)| {
+            let p = pages.get(i)?;
+            Some(NeighborNode {
+                id: p.id.0.clone(),
+                title: p.title.clone(),
+                token_cost: p.token_cost,
+                hops: h,
+                direction: direction_of(i),
+            })
+        })
+        .collect();
+
+    // Edges between nodes that made the cut.
+    let kept_idx: Vec<usize> = nodes
+        .iter()
+        .filter_map(|node| pages.iter().position(|p| p.id.0 == node.id))
+        .collect();
+
+    let mut edges = Vec::new();
+    for &i in &kept_idx {
+        for &j in &kept_idx {
+            if i == j {
+                continue;
+            }
+            let w = g.raw_weight(i, j);
+            if w > 0.0 {
+                edges.push(NeighborEdge {
+                    from: pages[i].id.0.clone(),
+                    to: pages[j].id.0.clone(),
+                    weight: w,
+                });
+            }
+        }
+    }
+
+    Ok(Json(NeighborhoodResponse {
+        center: id,
+        nodes,
+        edges,
+        truncated,
+    }))
+}
+
+// ─── SSR / SEO handlers ──────────────────────────────────────────────────────
+
+fn base_url(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:3001");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_else(|| {
+            if host.starts_with("localhost") || host.starts_with("127.") || host.starts_with("0.0.0.0") {
+                "http"
+            } else {
+                "https"
+            }
+        });
+    format!("{scheme}://{host}")
+}
+
+async fn ssr_article_handler(
+    State(state): State<AppState>,
+    Path((corpus, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(mutex) = state.corpora.get(&corpus) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let wiki = mutex.lock().unwrap();
+    let base = base_url(&headers);
+    match ssr::render_article(&wiki, &corpus, &id, &base) {
+        Some(html) => Html(html).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn ssr_corpus_handler(
+    State(state): State<AppState>,
+    Path(corpus): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(mutex) = state.corpora.get(&corpus) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let wiki = mutex.lock().unwrap();
+    let base = base_url(&headers);
+    Html(ssr::render_corpus(&wiki, &corpus, &base)).into_response()
+}
+
+async fn sitemap_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let base = base_url(&headers);
+    let xml = ssr::render_sitemap(&state.corpora, &base);
+    (
+        [("content-type", "application/xml; charset=utf-8")],
+        xml,
+    ).into_response()
+}
+
+async fn robots_handler(headers: HeaderMap) -> Response {
+    let base = base_url(&headers);
+    (
+        [("content-type", "text/plain; charset=utf-8")],
+        ssr::render_robots(&base),
+    ).into_response()
+}
+
+async fn list_corpora(State(state): State<AppState>) -> Json<Vec<CorpusSummary>> {
+    let active = state.active.read().unwrap().clone();
+    let out: Vec<CorpusSummary> = state
+        .corpora
+        .iter()
+        .map(|(name, mutex)| {
+            let wiki = mutex.lock().unwrap();
+            let g = wiki.graph();
+            let n = g.len();
+            let (_, _, values) = g.adj_transpose_csr();
+            let edge_count = values.len();
+            let max_edges = if n > 1 { n * (n - 1) } else { 1 };
+            CorpusSummary {
+                name: name.clone(),
+                page_count: n,
+                edge_count,
+                density: edge_count as f64 / max_edges as f64,
+                active: *name == active,
+            }
+        })
+        .collect();
+    Json(out)
+}
+
+async fn select_corpus(
+    State(state): State<AppState>,
+    Json(req): Json<SelectCorpusRequest>,
+) -> Result<StatusCode, StatusCode> {
+    if !state.corpora.contains_key(&req.name) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    *state.active.write().unwrap() = req.name;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
     let wiki = acquire_wiki(&state);
     let g = wiki.graph();
     let n = g.len();
-
-    let edge_count = (0..n)
-        .flat_map(|i| (0..n).map(move |j| (i, j)))
-        .filter(|&(i, j)| g.raw_weight(i, j) > 0.0)
-        .count();
-
+    // Edge count == CSR nnz. Avoids an O(n²) scan on every poll.
+    let (_, _, values) = g.adj_transpose_csr();
+    let edge_count = values.len();
     let max_edges = if n > 1 { n * (n - 1) } else { 1 };
-
     Json(StatsResponse {
         page_count: n,
         edge_count,
@@ -403,45 +680,82 @@ async fn simulate_handler(
 
 #[tokio::main]
 async fn main() {
-    let wiki_root = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("Usage: cowiki-server <wiki-directory>");
-        std::process::exit(1);
-    });
+    // CLI:  cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist>]
+    // Every non-flag argument is a corpus root; its directory basename is
+    // the corpus name shown in the UI selector.
+    let argv: Vec<String> = std::env::args().collect();
 
-    let root = PathBuf::from(&wiki_root);
-    if !root.exists() {
-        eprintln!("Directory does not exist: {wiki_root}");
+    let mut ui_dir: Option<String> = None;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "--ui" {
+            ui_dir = argv.get(i + 1).cloned();
+            i += 2;
+        } else {
+            roots.push(PathBuf::from(a));
+            i += 1;
+        }
+    }
+
+    if roots.is_empty() {
+        eprintln!("Usage: cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist-dir>]");
         std::process::exit(1);
     }
 
-    eprintln!("Opening wiki at: {wiki_root}");
-    let wiki = WikiBackend::open_or_rebuild(&root).unwrap_or_else(|e| {
-        eprintln!("Failed to open wiki: {e}");
-        std::process::exit(1);
-    });
-    eprintln!("Indexed {} pages", wiki.len());
+    let mut corpora: BTreeMap<String, Mutex<WikiBackend>> = BTreeMap::new();
+    for root in &roots {
+        if !root.exists() {
+            eprintln!("Directory does not exist: {}", root.display());
+            std::process::exit(1);
+        }
+        let name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("corpus")
+            .to_string();
+        eprintln!("Opening corpus '{name}' at {}", root.display());
+        let wiki = WikiBackend::open_or_rebuild(root).unwrap_or_else(|e| {
+            eprintln!("  failed: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("  indexed {} pages", wiki.len());
+        if corpora.contains_key(&name) {
+            eprintln!("  duplicate corpus name '{name}' — skipping");
+            continue;
+        }
+        corpora.insert(name, Mutex::new(wiki));
+    }
 
+    // Default active: the first corpus in alphabetical order (BTreeMap's natural order).
+    let first = corpora.keys().next().cloned().unwrap();
     let state: AppState = Arc::new(Inner {
-        wiki: Mutex::new(wiki),
+        corpora,
+        active: RwLock::new(first.clone()),
         counters: Counters::new(),
     });
 
     let mut app = Router::new()
+        .route("/api/corpora", get(list_corpora))
+        .route("/api/corpora/select", post(select_corpus))
         .route("/api/pages", get(list_pages).post(create_page_handler))
         .route("/api/pages/{*id}", get(get_page))
         .route("/api/query", post(query_pages))
         .route("/api/maintain", post(maintain_handler))
         .route("/api/stats", get(stats_handler))
+        .route("/api/neighborhood/{*id}", get(neighborhood_handler))
         .route("/api/perf", get(perf_handler))
         .route("/api/stress", post(stress_handler))
         .route("/api/simulate", get(simulate_handler))
+        // SEO / SSR surfaces — crawlers and link shares land here.
+        .route("/w/{corpus}/{*id}", get(ssr_article_handler))
+        .route("/c/{corpus}", get(ssr_corpus_handler))
+        .route("/sitemap.xml", get(sitemap_handler))
+        .route("/robots.txt", get(robots_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    // Serve static UI files if --ui <path> is provided.
-    let ui_dir = std::env::args().nth(2).and_then(|flag| {
-        if flag == "--ui" { std::env::args().nth(3) } else { None }
-    });
     if let Some(ref dir) = ui_dir {
         eprintln!("Serving UI from: {dir}");
         app = app.fallback_service(
@@ -454,10 +768,9 @@ async fn main() {
 
     let addr = "0.0.0.0:3001";
     if ui_dir.is_some() {
-        eprintln!("Co-Wiki ready at http://{addr}");
+        eprintln!("Co-Wiki ready at http://{addr}  (default corpus: {first})");
     } else {
-        eprintln!("API ready at http://{addr}");
-        eprintln!("  (add --ui <path> to serve the frontend)");
+        eprintln!("API ready at http://{addr}  (default corpus: {first})");
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

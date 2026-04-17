@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { listPages, getPage, queryPages, createPage, runMaintain, getStats, getPerf, runStress } from './api'
+import { listPages, getPage, queryPages, createPage, runMaintain, getStats, getPerf, runStress, getCorpora, selectCorpus } from './api'
 import SimulationTab from './SimulationTab'
+import SearchTab from './SearchTab'
+import CorpusSelector, { topicStyle } from './CorpusSelector'
 import './index.css'
 
 function HealthRing({ value }) {
@@ -62,8 +64,42 @@ export default function App() {
   const [newId, setNewId] = useState('')
   const [newTitle, setNewTitle] = useState('')
   const [newContent, setNewContent] = useState('')
-  const [tab, setTab] = useState('wiki')
+  const [tab, setTab] = useState('search')
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme || 'dark')
+  const [corpora, setCorpora] = useState([])
+  const [activeCorpus, setActiveCorpus] = useState(null)
   const perfInterval = useRef(null)
+
+  useEffect(() => {
+    getCorpora().then(cs => {
+      setCorpora(cs)
+      const active = cs.find(c => c.active) || cs[0]
+      if (active) setActiveCorpus(active.name)
+    })
+  }, [])
+
+  const handleCorpusSwitch = useCallback(async (name) => {
+    const ok = await selectCorpus(name)
+    if (!ok) return
+    setActiveCorpus(name)
+    setSelected(null)
+    setResults(null)
+    setMaintainResult(null)
+    setStressResult(null)
+    const cs = await getCorpora()
+    setCorpora(cs)
+    const [p, s, pf] = await Promise.all([listPages(), getStats(), getPerf()])
+    setPages(p)
+    setStats(s)
+    setPerf(pf)
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem('cowiki-theme', theme) } catch (e) { /* ignore */ }
+  }, [theme])
+
+  const toggleTheme = () => setTheme(t => t === 'dark' ? 'light' : 'dark')
 
   const exampleQueries = [
     { label: 'memory + sleep', query: 'memory sleep consolidation' },
@@ -147,11 +183,22 @@ export default function App() {
             <h1>Co-Wiki</h1>
             <span className="sub">Spreading Activation Engine</span>
           </div>
+          {corpora.length > 0 && activeCorpus && (
+            <CorpusSelector
+              corpora={corpora}
+              activeName={activeCorpus}
+              onSelect={handleCorpusSwitch}
+            />
+          )}
           <div style={{ display: 'flex', gap: 2, marginLeft: 16 }}>
+            <button
+              className={`tab-btn ${tab === 'search' ? 'active' : ''}`}
+              onClick={() => setTab('search')}
+            >Search</button>
             <button
               className={`tab-btn ${tab === 'wiki' ? 'active' : ''}`}
               onClick={() => setTab('wiki')}
-            >Wiki</button>
+            >Instrument</button>
             <button
               className={`tab-btn ${tab === 'simulate' ? 'active' : ''}`}
               onClick={() => setTab('simulate')}
@@ -171,6 +218,16 @@ export default function App() {
             <div className={`mutex-dot ${busy ? 'busy' : ''}`} />
             {busy ? 'LOCKED' : 'IDLE'}
           </div>
+          <button
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+          >
+            <span className="material-symbols-outlined">
+              {theme === 'dark' ? 'light_mode' : 'dark_mode'}
+            </span>
+          </button>
         </div>
       </header>
 
@@ -178,6 +235,8 @@ export default function App() {
         <div style={{ gridColumn: '1 / -1' }}>
           <SimulationTab />
         </div>
+      ) : tab === 'search' ? (
+        <SearchTab key={activeCorpus || 'none'} />
       ) : <>
 
       {/* ── Left panel: Query + Pages ─────────────────────────── */}

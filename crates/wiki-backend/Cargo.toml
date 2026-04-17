@@ -28,3 +28,7 @@ tempfile = "3"
 [[bin]]
 name = "profile_harness"
 required-features = ["tempfile"]
+
+[[bench]]
+name = "bench"
+harness = false

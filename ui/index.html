@@ -4,9 +4,51 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ui</title>
+    <title>Co-Wiki — Spreading Activation Search</title>
+    <meta name="description" content="Co-Wiki is a legible memory architecture for associative retrieval. Search multiple knowledge corpora via spreading activation over a directed graph — what vector search misses, graph traversal finds." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Co-Wiki" />
+    <meta property="og:title" content="Co-Wiki — Spreading Activation Search" />
+    <meta property="og:description" content="Graph-based retrieval over curated knowledge corpora. Associative reach where vector search falls short." />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Co-Wiki — Spreading Activation Search" />
+    <meta name="twitter:description" content="Graph-based retrieval over curated knowledge corpora." />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Co-Wiki",
+        "description": "Spreading-activation search over curated knowledge graphs",
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": {
+            "@type": "EntryPoint",
+            "urlTemplate": "?q={search_term_string}"
+          },
+          "query-input": "required name=search_term_string"
+        }
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..500,0..1,-25..0" />
   </head>
   <body>
+    <script>
+      // Apply theme before React mounts, to prevent a flash of the wrong theme.
+      (function () {
+        try {
+          var saved = localStorage.getItem('cowiki-theme');
+          var prefers = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          document.documentElement.dataset.theme = saved || prefers;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

@@ -160,7 +160,7 @@ pub fn spread<T: ThresholdFn>(
 
     let d = config.d;
     let one_minus_d = 1.0 - d;
-    let adj = graph.adj_matrix();
+    let (row_ptr, col_idx, values) = graph.adj_transpose_csr();
 
     let mut current = initial.to_vec();
     let mut residuals = Vec::with_capacity(config.max_iter);
@@ -171,13 +171,14 @@ pub fn spread<T: ThresholdFn>(
         // Apply threshold to current activation.
         let thresholded: Vec<f64> = current.iter().map(|&a| threshold.apply(a)).collect();
 
-        // Compute W^T · f(a): for each node j, sum over i of adj[i][j] * thresholded[i].
-        // adj is row-major: adj[i * n + j] = W[i][j].
-        // W^T[j][i] = W[i][j], so (W^T · v)[j] = sum_i W[i][j] * v[i].
+        // Compute (Wᵀ · f(a))[j] = Σ_{k in row j of Wᵀ} values[k] · thresholded[col_idx[k]].
+        // Sparse: skips the ~99% zeros in a typical wiki graph.
         for j in 0..n {
             let mut spread_j = 0.0;
-            for i in 0..n {
-                spread_j += adj[i * n + j] * thresholded[i];
+            let start = row_ptr[j];
+            let end = row_ptr[j + 1];
+            for k in start..end {
+                spread_j += values[k] * thresholded[col_idx[k]];
             }
             next[j] = one_minus_d * initial[j] + d * spread_j;
         }
@@ -238,7 +239,7 @@ fn one_step<T: ThresholdFn>(
     d: f64,
 ) -> Vec<f64> {
     let n = graph.len();
-    let adj = graph.adj_matrix();
+    let (row_ptr, col_idx, values) = graph.adj_transpose_csr();
     let one_minus_d = 1.0 - d;
 
     let thresholded: Vec<f64> = current.iter().map(|&a| threshold.apply(a)).collect();
@@ -246,8 +247,10 @@ fn one_step<T: ThresholdFn>(
     let mut next = vec![0.0; n];
     for j in 0..n {
         let mut spread_j = 0.0;
-        for i in 0..n {
-            spread_j += adj[i * n + j] * thresholded[i];
+        let start = row_ptr[j];
+        let end = row_ptr[j + 1];
+        for k in start..end {
+            spread_j += values[k] * thresholded[col_idx[k]];
         }
         next[j] = one_minus_d * initial[j] + d * spread_j;
     }
