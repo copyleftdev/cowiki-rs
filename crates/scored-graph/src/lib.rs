@@ -302,6 +302,27 @@ impl ScoredGraph {
         }
     }
 
+    /// Append a new node with the given cost and empty adjacency. Returns the
+    /// new node's index. O(1) amortised — all CSR arrays grow by one entry
+    /// (new row_ptr entries equal to previous end, empty forward + transpose
+    /// rows). After adding outgoing edges via [`Self::set_edge`], call
+    /// [`Self::renormalize`] to rebuild the transpose.
+    pub fn add_node(&mut self, cost: u64) -> usize {
+        assert!(cost > 0, "cost must be positive");
+        let new_idx = self.n;
+        self.n += 1;
+        // Forward CSR: append a new row pointer at the current end.
+        self.raw_row_ptr.push(*self.raw_row_ptr.last().unwrap_or(&0));
+        // Transpose CSR: append a new row pointer at its current end
+        // (new node has no incoming edges until someone adds them).
+        self.adj_t_row_ptr.push(*self.adj_t_row_ptr.last().unwrap_or(&0));
+        // Per-node state.
+        self.row_sum.push(0.0);
+        self.costs.push(cost);
+        self.categories.push(0);
+        new_idx
+    }
+
     /// Multiply every outgoing edge weight of node `i` by `factor`.
     /// O(out-degree). Used by decay. Call [`Self::renormalize`] after.
     pub fn scale_row(&mut self, i: usize, factor: EdgeWeight) {
@@ -497,6 +518,27 @@ mod tests {
         assert_eq!(g.raw_weight(0, 1), 0.0);
         g.renormalize();
         assert!(g.is_row_stochastic());
+    }
+
+    #[test]
+    fn add_node_grows_graph() {
+        let mut g = ScoredGraph::from_edges(2, &[(0, 1, 1.0)], vec![100, 100]);
+        let new = g.add_node(50);
+        assert_eq!(new, 2);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g.cost(new), 50);
+        assert_eq!(g.neighbors_out(new), Vec::<usize>::new());
+        assert_eq!(g.neighbors_in(new), Vec::<usize>::new());
+        // Add outgoing edge from new node.
+        g.set_edge(new, 0, 1.0);
+        g.renormalize();
+        assert!(g.is_row_stochastic());
+        assert!((g.raw_weight(new, 0) - 1.0).abs() < 1e-6);
+        // And incoming edge to new node.
+        g.set_edge(0, new, 2.0);
+        g.renormalize();
+        assert!(g.is_row_stochastic());
+        assert!(g.neighbors_in(new).contains(&0));
     }
 
     #[test]

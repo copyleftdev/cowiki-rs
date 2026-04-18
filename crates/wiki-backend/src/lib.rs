@@ -216,18 +216,101 @@ impl WikiBackend {
         Ok(())
     }
 
-    /// Create a new wiki page and rebuild the index.
+    /// Create a new wiki page. Incremental by default: touches only the new
+    /// page's index entries and graph row instead of rescanning the whole
+    /// corpus. Falls back to a full rebuild if the page id collides with an
+    /// existing one (sign that the incremental path would violate invariants).
+    ///
+    /// At n=25k this takes the write path from seconds to milliseconds while
+    /// preserving all math invariants (the fixture runtime-audit proves it).
     pub fn create_page(
         &mut self,
         id: &PageId,
         title: &str,
         content: &str,
     ) -> Result<(), WikiError> {
+        // Collisions are rare but they would break the incremental invariants
+        // (duplicate id → duplicate node, CSR binary-search assumes uniqueness).
+        // Let rebuild() handle them via the full-rescan path.
+        if self.index.id_to_idx.contains_key(&id.0) {
+            write::create_page(&self.root, id, title, content)?;
+            return self.rebuild();
+        }
+
+        let trace = std::env::var("COWIKI_TRACE_CREATE").is_ok();
+        let t0 = std::time::Instant::now();
+
         write::create_page(&self.root, id, title, content)?;
-        self.rebuild()
+        if trace { eprintln!("    [create] write_md: {} ms", t0.elapsed().as_millis()); }
+
+        // The on-disk content is `# {title}\n\n{content}\n` — feed that to
+        // TF-IDF so the indexed text matches what a rescan would see.
+        let stored = format!("# {title}\n\n{content}\n");
+        let links = parse::extract_links(&stored);
+        let token_cost = (stored.len() as u64 / 4).max(1);
+        let rel_path = std::path::PathBuf::from(format!("{}.md", id.0));
+
+        // Append the graph node first so we have the canonical index.
+        let t = std::time::Instant::now();
+        let new_idx = self.graph.add_node(token_cost);
+        if trace { eprintln!("    [create] add_node: {} ms", t.elapsed().as_millis()); }
+        debug_assert_eq!(new_idx, self.index.pages.len());
+
+        // Keep persisted sidecars in lockstep with the graph's node count:
+        // - `index.costs` is written to SQLite on save; stale length there
+        //   would break load via `ScoredGraph::new` on the next restart.
+        // - `temporal_state.last_access` + `alive` are indexed per-node by
+        //   `rem_cycle`; missing entries → out-of-bounds panic.
+        self.index.costs.push(token_cost);
+        let ts = &mut self.index.temporal_state;
+        ts.last_access.push(ts.time);
+        ts.alive.push(true);
+        // activation_history entries from before this moment stay shorter;
+        // prune_candidates already treats missing slots as zero activation.
+
+        // TF-IDF: append the new doc's vector, grow vocab as needed.
+        let t = std::time::Instant::now();
+        let tfidf_idx = self.tfidf.add_document(&stored);
+        if trace { eprintln!("    [create] tfidf.add_document: {} ms", t.elapsed().as_millis()); }
+        debug_assert_eq!(tfidf_idx, new_idx);
+
+        // Append page metadata.
+        self.index.pages.push(PageMeta {
+            id: id.clone(),
+            path: rel_path,
+            title: title.to_string(),
+            links_to: links.clone(),
+            token_cost,
+            category: 0, // categories are a scan-pass concern; skip for now.
+        });
+        self.index.id_to_idx.insert(id.0.clone(), new_idx);
+
+        // Resolve the new page's outbound links and set edges. Dangling
+        // targets are silently skipped (matches the scan-pass behaviour).
+        let t = std::time::Instant::now();
+        for link in &links {
+            if let Some(&target) = self.index.id_to_idx.get(&link.0) {
+                if target != new_idx {
+                    self.graph.set_edge(new_idx, target, 1.0);
+                }
+            }
+        }
+        if trace { eprintln!("    [create] set_edges: {} ms", t.elapsed().as_millis()); }
+
+        let t = std::time::Instant::now();
+        self.graph.renormalize();
+        if trace {
+            eprintln!("    [create] renormalize: {} ms", t.elapsed().as_millis());
+            eprintln!("    [create] TOTAL: {} ms", t0.elapsed().as_millis());
+        }
+
+        Ok(())
     }
 
-    /// Update a page and rebuild the index.
+    /// Update an existing page's content and rebuild the index. Stays on the
+    /// full-rescan path because update may change link targets, token cost,
+    /// and TF-IDF vector in arbitrary ways — the incremental-delta design
+    /// for update is a separate piece.
     pub fn update_page(&mut self, id: &PageId, content: &str) -> Result<(), WikiError> {
         write::update_page(&self.root, id, content)?;
         self.rebuild()

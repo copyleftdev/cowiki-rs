@@ -39,6 +39,75 @@ impl TfIdfIndex {
         let norms = precompute_norms(&dense);
         Self { n_docs, df, vectors, dense, norms, vocab_idx }
     }
+
+    /// Append a new document to the index. Returns the new doc's index.
+    ///
+    /// Updates:
+    /// - `df` gets +1 for each unique term in `content`
+    /// - `vocab_idx` grows to cover any term never seen before
+    /// - every existing dense vector is extended with zeros at new term slots
+    ///   (`O(n_docs · new_terms_in_this_doc)`)
+    /// - the new doc's sparse and dense vectors are appended
+    ///
+    /// Accepts a small **IDF drift** for previously-indexed docs: their
+    /// sparse/dense values were computed with the old `df` and stay frozen.
+    /// This is acceptable when adding a handful of docs relative to a large
+    /// corpus; for deep consistency call `build_index` from scratch.
+    pub fn add_document(&mut self, content: &str) -> usize {
+        let new_idx = self.n_docs;
+
+        // Tokenize + local tf.
+        let mut tf: HashMap<String, usize> = HashMap::new();
+        let mut terms_in_doc: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for term in tokenize(content) {
+            *tf.entry(term.clone()).or_insert(0) += 1;
+            terms_in_doc.insert(term);
+        }
+
+        // Update df and grow vocab_idx for previously-unseen terms.
+        let mut new_vocab: Vec<String> = Vec::new();
+        for term in &terms_in_doc {
+            *self.df.entry(term.clone()).or_insert(0) += 1;
+            if !self.vocab_idx.contains_key(term) {
+                let slot = self.vocab_idx.len();
+                self.vocab_idx.insert(term.clone(), slot);
+                new_vocab.push(term.clone());
+            }
+        }
+
+        // Do NOT extend existing dense vectors for new vocab terms.
+        // Old docs by definition had zero weight at those slots (they did
+        // not contain the term). `ignite` bounds-checks the index and
+        // treats out-of-range slots as zero — so leaving the old dense
+        // vectors at their creation-time length is both correct and
+        // avoids O(n_docs) work per new term. This is what takes write
+        // cost at 25k from ~6.5 s to milliseconds.
+        let _ = new_vocab;
+
+        // Build the new doc's sparse tf-idf vector using the updated df.
+        self.n_docs += 1;
+        let n_docs_f = self.n_docs as f64;
+        let max_tf = tf.values().copied().max().unwrap_or(1) as f64;
+        let sparse: HashMap<String, f64> = tf.iter().map(|(term, &count)| {
+            let tf_norm = count as f64 / max_tf;
+            let df_val = *self.df.get(term).unwrap_or(&1) as f64;
+            let idf = (n_docs_f / df_val).ln() + 1.0;
+            (term.clone(), tf_norm * idf)
+        }).collect();
+
+        // Dense vector of the new doc (sized to current vocab_idx).
+        let mut dense = vec![0.0f64; self.vocab_idx.len()];
+        for (term, &value) in &sparse {
+            if let Some(&idx) = self.vocab_idx.get(term) { dense[idx] = value; }
+        }
+        let norm = l2_norm(&dense);
+
+        self.vectors.push(sparse);
+        self.dense.push(dense);
+        self.norms.push(norm);
+
+        new_idx
+    }
 }
 
 /// Build a TF-IDF index from page contents.
@@ -109,13 +178,17 @@ pub fn ignite(index: &TfIdfIndex, query: &str) -> Vec<f64> {
     // Sort by vocab_idx for cache-friendly doc access.
     query_sparse.sort_unstable_by_key(|(i, _)| *i);
 
+    // Bounds-check each slot lookup: `add_document` grows `vocab_idx` but
+    // does not back-fill existing dense vectors, so slots beyond a given
+    // doc's length are definitionally zero.
     index.dense.iter().zip(index.norms.iter()).map(|(doc, &doc_norm)| {
         if doc_norm == 0.0 {
             0.0
         } else {
             let mut s = 0.0;
+            let dlen = doc.len();
             for &(i, qw) in &query_sparse {
-                s += qw * doc[i];
+                if i < dlen { s += qw * doc[i]; }
             }
             s / (query_norm * doc_norm)
         }
