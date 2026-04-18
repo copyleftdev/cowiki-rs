@@ -11,6 +11,7 @@ members = [
     "crates/wiki-backend",
     "crates/cowiki-server",
     "crates/seed-corpus",
+    "crates/cl-ingest",
 ]
 
 [workspace.dependencies]

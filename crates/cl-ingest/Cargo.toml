@@ -1,0 +1,39 @@
+[package]
+name = "cl-ingest"
+version = "0.1.0"
+edition = "2021"
+description = "Fast CourtListener bulk-data extractors — Rust replacements for the Python stages where CSV parsing on >1 KB rows dominates."
+
+[dependencies]
+bzip2 = "0.4"
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+memchr = "2"
+rayon = "1"
+ahash = "0.8"
+atoi = "2"
+flate2 = "1"
+regex = "1"
+dashmap = "5"
+serde_json = "1"
+
+[[bin]]
+name = "extract_opinion_cluster"
+path = "src/bin/extract_opinion_cluster.rs"
+
+[[bin]]
+name = "aggregate_citations"
+path = "src/bin/aggregate_citations.rs"
+
+[[bin]]
+name = "peek_opinion"
+path = "src/bin/peek_opinion.rs"
+
+[[bin]]
+name = "extract_opinion_bodies"
+path = "src/bin/extract_opinion_bodies.rs"
+
+[[bin]]
+name = "enrich_scotus"
+path = "src/bin/enrich_scotus.rs"
