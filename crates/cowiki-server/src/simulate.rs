@@ -11,6 +11,8 @@ use wiki_backend::WikiBackend;
 use spread::SpreadConfig;
 use temporal_graph::RemConfig;
 
+use crate::percentile;
+
 const WORDS: &[&str] = &[
     "neural", "network", "transformer", "attention", "gradient", "backprop",
     "convolution", "embedding", "tokenizer", "decoder", "encoder", "diffusion",
@@ -325,9 +327,9 @@ where
         total_us,
         query_count: qn,
         query_avg_us: if qn > 0 { query_latencies.iter().sum::<u64>() as f64 / qn as f64 } else { 0.0 },
-        query_p50_us: if qn > 0 { query_latencies[qn / 2] } else { 0 },
-        query_p95_us: if qn > 0 { query_latencies[qn * 95 / 100] } else { 0 },
-        query_p99_us: if qn > 0 { query_latencies[qn * 99 / 100] } else { 0 },
+        query_p50_us: if qn > 0 { percentile(&query_latencies, 50) } else { 0 },
+        query_p95_us: if qn > 0 { percentile(&query_latencies, 95) } else { 0 },
+        query_p99_us: if qn > 0 { percentile(&query_latencies, 99) } else { 0 },
         maintain_count,
         create_count,
         final_pages: final_n,

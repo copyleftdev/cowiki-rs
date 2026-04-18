@@ -436,6 +436,12 @@ impl WikiBackend {
             .and_then(|&idx| self.index.pages.get(idx))
     }
 
+    /// Get the graph index for a page ID. O(1). Exposed so callers that need
+    /// to follow graph edges can avoid rescanning the page list.
+    pub fn page_index(&self, id: &PageId) -> Option<usize> {
+        self.index.id_to_idx.get(&id.0).copied()
+    }
+
     /// Wiki root directory.
     pub fn root(&self) -> &Path {
         &self.root

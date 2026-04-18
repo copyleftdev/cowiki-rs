@@ -37,6 +37,12 @@ struct Inner {
     corpora: BTreeMap<String, RwLock<WikiBackend>>,
     active: RwLock<String>,
     counters: Counters,
+    /// In read-only mode all mutating endpoints (create_page, maintain,
+    /// corpus-select) return 403. Enabled via `--read-only` when the
+    /// server is deployed publicly without an edge (Caddy/CF) to enforce
+    /// the same guarantee. Read endpoints (query, get_page, neighborhood,
+    /// stats, perf, stress) are unaffected.
+    read_only: bool,
 }
 
 /// Live performance counters.
@@ -265,15 +271,57 @@ struct StressResponse {
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-async fn list_pages(State(state): State<AppState>) -> Json<Vec<PageSummary>> {
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ListPagesParams {
+    /// Cap the number of entries returned. Omit for no limit.
+    /// The UI passes a cap because at 100k+ pages the full list is
+    /// unrenderable in a browser; small corpora get the whole list as before.
+    limit: Option<usize>,
+    /// `id` (default, alphabetical) or `hubs` (outbound-link count desc).
+    order: Option<String>,
+}
+
+async fn list_pages(
+    State(state): State<AppState>,
+    AxumQuery(params): AxumQuery<ListPagesParams>,
+) -> Json<Vec<PageSummary>> {
     let wiki = acquire_wiki(&state);
-    let pages = wiki.all_pages().iter().map(|p| PageSummary {
-        id: p.id.0.clone(),
-        title: p.title.clone(),
-        token_cost: p.token_cost,
-        link_count: p.links_to.len(),
-        links_to: p.links_to.iter().map(|l| l.0.clone()).collect(),
-    }).collect();
+    let all = wiki.all_pages();
+
+    // If the client asked for hub-ordering, use a partial heap-style selection
+    // instead of sorting all N — O(N log k) rather than O(N log N). At N=500k,
+    // k=8 this is ~500k comparisons vs ~10M.
+    let want_hubs = params.order.as_deref() == Some("hubs");
+    let mut selected: Vec<&wiki_backend::types::PageMeta> = if want_hubs {
+        let k = params.limit.unwrap_or(all.len()).min(all.len());
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
+            std::collections::BinaryHeap::with_capacity(k + 1);
+        for (i, p) in all.iter().enumerate() {
+            heap.push(std::cmp::Reverse((p.links_to.len(), i)));
+            if heap.len() > k { heap.pop(); }
+        }
+        let mut out: Vec<(usize, usize)> = heap
+            .into_iter()
+            .map(|std::cmp::Reverse(pair)| pair)
+            .collect();
+        out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        out.into_iter().map(|(_, i)| &all[i]).collect()
+    } else {
+        let take = params.limit.unwrap_or(all.len());
+        all.iter().take(take).collect()
+    };
+
+    let pages = selected
+        .drain(..)
+        .map(|p| PageSummary {
+            id: p.id.0.clone(),
+            title: p.title.clone(),
+            token_cost: p.token_cost,
+            link_count: p.links_to.len(),
+            links_to: p.links_to.iter().map(|l| l.0.clone()).collect(),
+        })
+        .collect();
     Json(pages)
 }
 
@@ -342,6 +390,7 @@ async fn create_page_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePageRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    if state.read_only { return Err(StatusCode::FORBIDDEN); }
     let mut wiki = acquire_wiki_mut(&state);
     let id = req.id.clone();
     wiki.create_page(&PageId(req.id), &req.title, &req.content)
@@ -362,6 +411,7 @@ async fn create_page_handler(
 async fn maintain_handler(
     State(state): State<AppState>,
 ) -> Result<Json<MaintainResponse>, StatusCode> {
+    if state.read_only { return Err(StatusCode::FORBIDDEN); }
     let t = Instant::now();
     let mut wiki = acquire_wiki_mut(&state);
     let report = wiki.maintain_with_dream(&RemConfig::default());
@@ -403,24 +453,23 @@ async fn neighborhood_handler(
     let g = wiki.graph();
     let n = g.len();
 
-    let center = pages
-        .iter()
-        .position(|p| p.id.0 == id)
+    let center = wiki
+        .page_index(&PageId(id.clone()))
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // BFS out to depth 2 treating the graph as undirected (associative reach
     // is what we want to surface — direction is encoded per-node separately).
+    // Walk the CSR adjacency directly via neighbors_out/in — O(Σ degrees of
+    // frontier) instead of O(frontier × n). At n=495k the previous scan-all
+    // path cost ~1s on a hub node; this is < 10ms.
     let mut hops: Vec<Option<u32>> = vec![None; n];
     hops[center] = Some(0);
     let mut frontier = vec![center];
     for depth in 1..=2u32 {
         let mut next = Vec::new();
         for &i in &frontier {
-            for j in 0..n {
-                if hops[j].is_some() {
-                    continue;
-                }
-                if g.raw_weight(i, j) > 0.0 || g.raw_weight(j, i) > 0.0 {
+            for j in g.neighbors_out(i).into_iter().chain(g.neighbors_in(i)) {
+                if hops[j].is_none() {
                     hops[j] = Some(depth);
                     next.push(j);
                 }
@@ -450,27 +499,47 @@ async fn neighborhood_handler(
         .collect();
 
     // Cap: keep center + all 1-hop + best 2-hop by edge weight to any 1-hop node.
+    // We precompute score_2hop once per 2-hop node (O(reached × one_hop) but
+    // once, not O(reached log reached × one_hop) the way a closure in sort_by
+    // would have to recompute). At 495k with hub-class centers this is the
+    // difference between ~150 ms and a few ms per call.
     let truncated = reached.len() > MAX_NODES;
     if truncated {
-        let one_hop_idxs: std::collections::HashSet<usize> =
-            reached.iter().filter(|(_, h)| *h == 1).map(|(i, _)| *i).collect();
-        let score_2hop = |i: usize| -> f64 {
-            one_hop_idxs
-                .iter()
-                .map(|&j| g.raw_weight(i, j).max(g.raw_weight(j, i)))
-                .fold(0.0_f64, f64::max)
-        };
-        reached.sort_by(|a, b| {
+        let one_hop_idxs: Vec<usize> = reached
+            .iter()
+            .filter_map(|&(i, h)| if h == 1 { Some(i) } else { None })
+            .collect();
+        let mut score_cache: Vec<f64> = Vec::with_capacity(reached.len());
+        for &(i, h) in &reached {
+            let s = if h == 2 {
+                one_hop_idxs
+                    .iter()
+                    .map(|&j| g.raw_weight(i, j).max(g.raw_weight(j, i)))
+                    .fold(0.0_f64, f64::max)
+            } else {
+                0.0
+            };
+            score_cache.push(s);
+        }
+        let mut indexed: Vec<(usize, u32, f64)> = reached
+            .iter()
+            .zip(&score_cache)
+            .map(|(&(i, h), &s)| (i, h, s))
+            .collect();
+        indexed.sort_by(|a, b| {
             a.1.cmp(&b.1).then_with(|| {
-                score_2hop(b.0)
-                    .partial_cmp(&score_2hop(a.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
             })
         });
-        reached.truncate(MAX_NODES);
+        indexed.truncate(MAX_NODES);
+        reached = indexed.into_iter().map(|(i, h, _)| (i, h)).collect();
     }
 
-    let nodes: Vec<NeighborNode> = reached
+    // Keep indices alongside nodes so we don't need a second id→idx lookup pass.
+    // Previously this handler did `pages.iter().position(|p| p.id.0 == node.id)`
+    // for every kept node — 48 × N linear scans on a 495k corpus.
+    let kept: Vec<(usize, u32)> = reached.iter().copied().collect();
+    let nodes: Vec<NeighborNode> = kept
         .iter()
         .filter_map(|&(i, h)| {
             let p = pages.get(i)?;
@@ -485,10 +554,7 @@ async fn neighborhood_handler(
         .collect();
 
     // Edges between nodes that made the cut.
-    let kept_idx: Vec<usize> = nodes
-        .iter()
-        .filter_map(|node| pages.iter().position(|p| p.id.0 == node.id))
-        .collect();
+    let kept_idx: Vec<usize> = kept.iter().map(|&(i, _)| i).collect();
 
     let mut edges = Vec::new();
     for &i in &kept_idx {
@@ -612,6 +678,7 @@ async fn select_corpus(
     State(state): State<AppState>,
     Json(req): Json<SelectCorpusRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    if state.read_only { return Err(StatusCode::FORBIDDEN); }
     if !state.corpora.contains_key(&req.name) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -695,7 +762,7 @@ async fn stress_handler(
 
 /// Nearest-rank percentile: index = ceil(p/100 · n) − 1, clamped.
 /// Preconditions: `sorted` is non-empty and ascending; `p ≤ 100`.
-fn percentile(sorted: &[u64], p: usize) -> u64 {
+pub(crate) fn percentile(sorted: &[u64], p: usize) -> u64 {
     let n = sorted.len();
     let idx = ((p * n + 99) / 100).saturating_sub(1).min(n - 1);
     sorted[idx]
@@ -761,12 +828,14 @@ async fn simulate_handler(
 
 #[tokio::main]
 async fn main() {
-    // CLI:  cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist>]
+    // CLI:  cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist>] [--port <N>] [--read-only]
     // Every non-flag argument is a corpus root; its directory basename is
     // the corpus name shown in the UI selector.
     let argv: Vec<String> = std::env::args().collect();
 
     let mut ui_dir: Option<String> = None;
+    let mut port: u16 = 3001;
+    let mut read_only: bool = false;
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut i = 1;
     while i < argv.len() {
@@ -774,14 +843,29 @@ async fn main() {
         if a == "--ui" {
             ui_dir = argv.get(i + 1).cloned();
             i += 2;
+        } else if a == "--port" {
+            port = argv.get(i + 1)
+                .and_then(|s| s.parse().ok())
+                .expect("--port requires a u16");
+            i += 2;
+        } else if a == "--read-only" {
+            read_only = true;
+            i += 1;
         } else {
             roots.push(PathBuf::from(a));
             i += 1;
         }
     }
+    // Env var overrides so ops can configure without touching the CLI string.
+    if let Some(env_port) = std::env::var("COWIKI_PORT").ok().and_then(|s| s.parse().ok()) {
+        port = env_port;
+    }
+    if std::env::var("COWIKI_READ_ONLY").ok().as_deref() == Some("1") {
+        read_only = true;
+    }
 
     if roots.is_empty() {
-        eprintln!("Usage: cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist-dir>]");
+        eprintln!("Usage: cowiki-server <wiki-dir> [<wiki-dir> ...] [--ui <dist-dir>] [--port <N>] [--read-only]");
         std::process::exit(1);
     }
 
@@ -815,6 +899,7 @@ async fn main() {
         corpora,
         active: RwLock::new(first.clone()),
         counters: Counters::new(),
+        read_only,
     });
 
     let mut app = Router::new()
@@ -839,19 +924,48 @@ async fn main() {
 
     if let Some(ref dir) = ui_dir {
         eprintln!("Serving UI from: {dir}");
-        app = app.fallback_service(
-            tower_http::services::ServeDir::new(dir)
-                .fallback(tower_http::services::ServeFile::new(
-                    PathBuf::from(dir).join("index.html"),
-                )),
-        );
+        // Cache headers on static assets. DO App Platform's proxy injects
+        // `cache-control: private` by default, which blocks both edge and
+        // browser caching and forces every visitor to re-download the full
+        // bundle on every page load. Setting explicit headers here wins
+        // against their default because the browser sees both values and
+        // honors the closest-to-origin one.
+        //
+        // Vite emits hashed filenames under /assets/ — safe to cache for a
+        // year and mark immutable. The HTML shell at / is short-cached so
+        // a UI deploy propagates in minutes.
+        let static_router: Router = Router::new()
+            .fallback_service(
+                tower_http::services::ServeDir::new(dir)
+                    .fallback(tower_http::services::ServeFile::new(
+                        PathBuf::from(dir).join("index.html"),
+                    )),
+            )
+            .layer(axum::middleware::from_fn(
+                |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let path = req.uri().path().to_owned();
+                    let mut resp = next.run(req).await;
+                    let cc = if path.starts_with("/assets/") {
+                        "public, max-age=31536000, immutable"
+                    } else {
+                        "public, max-age=300"
+                    };
+                    resp.headers_mut().insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static(cc),
+                    );
+                    resp
+                },
+            ));
+        app = app.fallback_service(static_router);
     }
 
-    let addr = "0.0.0.0:3001";
+    let addr = format!("0.0.0.0:{port}");
+    let mode = if read_only { " [read-only]" } else { "" };
     if ui_dir.is_some() {
-        eprintln!("Co-Wiki ready at http://{addr}  (default corpus: {first})");
+        eprintln!("Co-Wiki ready at http://{addr}  (default corpus: {first}){mode}");
     } else {
-        eprintln!("API ready at http://{addr}  (default corpus: {first})");
+        eprintln!("API ready at http://{addr}  (default corpus: {first}){mode}");
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
