@@ -24,26 +24,16 @@ pub fn save(index: &WikiIndex, graph: &ScoredGraph, wiki_root: &Path) -> Result<
     // 1. Write companion .meta files (legible layer).
     meta::write_all_meta(&index.pages, wiki_root)?;
 
-    // 2. Write SQLite (engine layer) — single transaction for all writes.
+    // 2. Write SQLite + CSR sidecars (engine layer). Graph weights go to
+    //    sidecar files in .cowiki/ (O(nnz), not O(n²) — bypasses SQLite's
+    //    per-row blob size limit that broke dense persistence past ~11k
+    //    nodes). SQLite keeps the small stuff: page metadata, tfidf, etc.
     let mut conn = store::open_db(wiki_root)?;
     let n = index.pages.len();
-
-    // Promote f32 graph storage back to f64 for the on-disk blob. On-disk
-    // format is still dense n² (for back-compat with existing engine.db
-    // files); materialise it from the sparse CSR just long enough to write
-    // the blob, then drop.
-    let n_usize = n;
     let (rp, ci, v) = graph.raw_csr_forward();
-    let mut weights_f64 = vec![0.0f64; n_usize * n_usize];
-    for src in 0..n_usize {
-        for k in rp[src]..rp[src + 1] {
-            let dst = ci[k];
-            weights_f64[src * n_usize + dst] = v[k] as f64;
-        }
-    }
 
     let tx = conn.transaction()?;
-    store::save_graph(&tx, n, &weights_f64, &index.costs)?;
+    store::save_graph(&tx, wiki_root, n, rp, ci, v, &index.costs)?;
     store::save_tfidf(&tx, &index.df, &index.tfidf_vectors)?;
     store::save_temporal(&tx, &index.temporal_state)?;
 
@@ -78,13 +68,18 @@ pub fn load(wiki_root: &Path) -> Result<Option<(WikiIndex, ScoredGraph)>, WikiEr
 
     let conn = store::open_db(wiki_root)?;
 
-    // Load graph weights + costs from SQLite (f64 on disk; demoted to f32 by
-    // `ScoredGraph::new`). The caller does not retain the f64 vec.
-    let (n, raw_weights_f64, costs) = match store::load_graph(&conn)? {
+    // Graph: pull the CSR sidecars + SQLite costs row. If any are missing
+    // (fresh DB, migration from an older dense-blob schema, etc.) the
+    // caller treats this as "no persisted state" and rescans the markdown.
+    let g_data = match store::load_graph(&conn, wiki_root)? {
         Some(data) => data,
         None => return Ok(None),
     };
-    let graph = ScoredGraph::new(n, raw_weights_f64, costs.clone());
+    let n = g_data.n;
+    let costs = g_data.costs.clone();
+    let graph = ScoredGraph::from_raw_csr(
+        n, g_data.row_ptr, g_data.col_idx, g_data.values, g_data.costs,
+    );
 
     // Load TF-IDF.
     let (df, tfidf_vectors) = store::load_tfidf(&conn, n)?;

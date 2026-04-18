@@ -436,8 +436,9 @@ fn fixtures_scale() {
     use std::time::Instant;
     banner("scale-envelope");
     eprintln!(
-        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>10} {:>8} {:>10} {:>8}",
-        "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "rebuild_ms", "iters", "rss_mb_Δ", "conv%"
+        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>10} {:>8}",
+        "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "rebuild_ms",
+        "save_ms", "load_ms", "iters", "rss_mb_Δ", "conv%"
     );
 
     // Default ladder. Opt-in heavier rungs with AUDIT_SCALE=heavy.
@@ -482,14 +483,24 @@ fn fixtures_scale() {
         }
         lats.sort();
 
-        // Write-path cost: create one new page. This triggers the full
-        // rebuild() — currently O(n) — which is the dominant cost of any
-        // edit on the wiki. Future incremental-rebuild work should drive
-        // this column down.
+        // Write-path cost: create one new page. Post-incremental-rebuild
+        // this is O(out-degree + new-vocab) and should be near-zero.
         let page_id = wiki_backend::types::PageId(format!("audit-probe-{spec}"));
         let t_rb = Instant::now();
         wiki.create_page(&page_id, "probe", "Just a probe [[page-0]].").unwrap();
         let rebuild_ms = t_rb.elapsed().as_millis();
+
+        // Persistence round-trip: save + reload from SQLite. This is
+        // what a server restart pays.
+        let t_save = Instant::now();
+        wiki.save().unwrap();
+        let save_ms = t_save.elapsed().as_millis();
+        drop(wiki);
+
+        let t_load = Instant::now();
+        let reloaded = WikiBackend::open_or_rebuild(tmp.path()).unwrap();
+        let load_ms = t_load.elapsed().as_millis();
+        std::hint::black_box(&reloaded);
 
         let p50 = nearest_rank(&lats, 50);
         let p99 = nearest_rank(&lats, 99);
@@ -499,7 +510,8 @@ fn fixtures_scale() {
 
         eprintln!(
             "{spec:<14} {n:>6} {build_idx_ms:>12} {p50:>10} {p99:>10} \
-             {rebuild_ms:>10} {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
+             {rebuild_ms:>10} {save_ms:>8} {load_ms:>8} \
+             {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
         );
 
         // Sanity floor — these don't set a tight budget, they catch regressions

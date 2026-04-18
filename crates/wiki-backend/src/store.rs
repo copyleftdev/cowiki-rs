@@ -16,8 +16,14 @@ use rusqlite::{params, Connection};
 
 use crate::types::{SerializableTemporalState, WikiError};
 
-/// (n, weights, costs) tuple returned from graph loading.
-pub type GraphData = (usize, Vec<f64>, Vec<u64>);
+/// Forward CSR graph data as persisted on disk.
+pub struct CsrGraphData {
+    pub n: usize,
+    pub row_ptr: Vec<usize>,
+    pub col_idx: Vec<usize>,
+    pub values: Vec<f32>,
+    pub costs: Vec<u64>,
+}
 
 /// (document_frequencies, tfidf_vectors) tuple returned from TF-IDF loading.
 pub type TfIdfData = (HashMap<String, usize>, Vec<HashMap<String, f64>>);
@@ -76,42 +82,81 @@ fn init_schema(conn: &Connection) -> Result<(), WikiError> {
     Ok(())
 }
 
-/// Save the weight matrix and costs.
+/// Save the graph as three CSR sidecar files in `.cowiki/` plus a tiny
+/// SQLite row holding `n` and `costs`. Write cost is O(nnz), not O(n²) —
+/// at n=25k that's ~2 MB instead of the 5 GB dense blob that hit
+/// SQLite's per-row size ceiling.
+///
+/// The sidecar layout is chosen to be mmap-friendly: each file is a
+/// plain binary array of a single fixed-width type, so future code can
+/// `memmap2::Mmap` them and `bytemuck::cast_slice` to `&[usize]` /
+/// `&[f32]` without any parsing.
 pub fn save_graph(
     conn: &Connection,
+    wiki_root: &Path,
     n: usize,
-    weights: &[f64],
+    row_ptr: &[usize],
+    col_idx: &[usize],
+    values: &[f32],
     costs: &[u64],
 ) -> Result<(), WikiError> {
-    let weights_blob = f64_slice_to_bytes(weights);
-    let costs_blob = u64_slice_to_bytes(costs);
+    let meta_dir = wiki_root.join(".cowiki");
+    std::fs::create_dir_all(&meta_dir)?;
+    std::fs::write(meta_dir.join("graph.row_ptr"), usize_slice_to_bytes(row_ptr))?;
+    std::fs::write(meta_dir.join("graph.col_idx"), usize_slice_to_bytes(col_idx))?;
+    std::fs::write(meta_dir.join("graph.values"),  f32_slice_to_bytes(values))?;
 
+    // Tiny SQLite row holds only `n` and `costs` (small) plus a zero-length
+    // placeholder in the legacy `weights` blob column so the NOT NULL
+    // constraint on older schemas is still satisfied.
+    let costs_blob = u64_slice_to_bytes(costs);
     conn.execute(
         "INSERT OR REPLACE INTO graph (id, n, weights, costs) VALUES (1, ?1, ?2, ?3)",
-        params![n as i64, weights_blob, costs_blob],
+        params![n as i64, Vec::<u8>::new(), costs_blob],
     )?;
     Ok(())
 }
 
-/// Load the weight matrix and costs.
-pub fn load_graph(conn: &Connection) -> Result<Option<GraphData>, WikiError> {
-    let mut stmt = conn.prepare("SELECT n, weights, costs FROM graph WHERE id = 1")?;
+/// Load graph state from the CSR sidecars + SQLite costs row. Returns
+/// `None` if either the SQLite row or any of the three sidecar files is
+/// missing — the caller falls back to a full rescan from markdown.
+pub fn load_graph(conn: &Connection, wiki_root: &Path) -> Result<Option<CsrGraphData>, WikiError> {
+    // SQLite: read n and costs.
+    let mut stmt = conn.prepare("SELECT n, costs FROM graph WHERE id = 1")?;
     let result = stmt.query_row([], |row| {
         let n: i64 = row.get(0)?;
-        let weights_blob: Vec<u8> = row.get(1)?;
-        let costs_blob: Vec<u8> = row.get(2)?;
-        Ok((n as usize, weights_blob, costs_blob))
+        let costs_blob: Vec<u8> = row.get(1)?;
+        Ok((n as usize, costs_blob))
     });
-
-    match result {
-        Ok((n, wb, cb)) => {
-            let weights = bytes_to_f64_vec(&wb);
-            let costs = bytes_to_u64_vec(&cb);
-            Ok(Some((n, weights, costs)))
-        }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+    let (n, costs_blob) = match result {
+        Ok(data) => data,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let costs = bytes_to_u64_vec(&costs_blob);
+    if costs.len() != n {
+        return Ok(None); // inconsistent row — force rebuild
     }
+
+    // Sidecars.
+    let meta_dir = wiki_root.join(".cowiki");
+    let rp_path = meta_dir.join("graph.row_ptr");
+    let ci_path = meta_dir.join("graph.col_idx");
+    let v_path  = meta_dir.join("graph.values");
+    if !rp_path.exists() || !ci_path.exists() || !v_path.exists() {
+        return Ok(None); // sidecars missing — caller will rebuild
+    }
+
+    let row_ptr = bytes_to_usize_vec(&std::fs::read(&rp_path)?);
+    let col_idx = bytes_to_usize_vec(&std::fs::read(&ci_path)?);
+    let values  = bytes_to_f32_vec(&std::fs::read(&v_path)?);
+
+    // Light sanity — the from_raw_csr constructor will do the thorough pass.
+    if row_ptr.len() != n + 1 || col_idx.len() != values.len() {
+        return Ok(None);
+    }
+
+    Ok(Some(CsrGraphData { n, row_ptr, col_idx, values, costs }))
 }
 
 /// Save TF-IDF document frequencies and vectors.
@@ -260,6 +305,16 @@ fn bytes_to_f64_vec(bytes: &[u8]) -> Vec<f64> {
         .collect()
 }
 
+fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
+    data.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
 fn u64_slice_to_bytes(data: &[u64]) -> Vec<u8> {
     data.iter().flat_map(|u| u.to_le_bytes()).collect()
 }
@@ -267,6 +322,17 @@ fn u64_slice_to_bytes(data: &[u64]) -> Vec<u8> {
 fn bytes_to_u64_vec(bytes: &[u8]) -> Vec<u64> {
     bytes.chunks_exact(8)
         .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
+fn usize_slice_to_bytes(data: &[usize]) -> Vec<u8> {
+    // Persist as u64 LE so .cowiki sidecars are portable across 32/64-bit.
+    data.iter().flat_map(|u| (*u as u64).to_le_bytes()).collect()
+}
+
+fn bytes_to_usize_vec(bytes: &[u8]) -> Vec<usize> {
+    bytes.chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()) as usize)
         .collect()
 }
 
@@ -280,15 +346,21 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conn = open_db(tmp.path()).unwrap();
 
-        let weights = vec![0.0, 1.0, 0.5, 0.0];
-        let costs = vec![100, 200];
+        // 2-node graph: 0 -> 1 with weight 1.0. CSR: row_ptr=[0,1,1],
+        // col_idx=[1], values=[1.0].
+        let row_ptr: Vec<usize> = vec![0, 1, 1];
+        let col_idx: Vec<usize> = vec![1];
+        let values:  Vec<f32>   = vec![1.0];
+        let costs = vec![100u64, 200];
 
-        save_graph(&conn, 2, &weights, &costs).unwrap();
+        save_graph(&conn, tmp.path(), 2, &row_ptr, &col_idx, &values, &costs).unwrap();
 
-        let (n, loaded_w, loaded_c) = load_graph(&conn).unwrap().unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(loaded_w, weights);
-        assert_eq!(loaded_c, costs);
+        let loaded = load_graph(&conn, tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.n, 2);
+        assert_eq!(loaded.row_ptr, row_ptr);
+        assert_eq!(loaded.col_idx, col_idx);
+        assert_eq!(loaded.values, values);
+        assert_eq!(loaded.costs, costs);
     }
 
     #[test]
@@ -342,7 +414,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conn = open_db(tmp.path()).unwrap();
 
-        assert!(load_graph(&conn).unwrap().is_none());
+        assert!(load_graph(&conn, tmp.path()).unwrap().is_none());
         assert!(load_temporal(&conn).unwrap().is_none());
     }
 
@@ -351,10 +423,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conn = open_db(tmp.path()).unwrap();
 
-        save_graph(&conn, 1, &[0.0], &[100]).unwrap();
-        save_graph(&conn, 2, &[0.0, 1.0, 0.5, 0.0], &[100, 200]).unwrap();
+        save_graph(&conn, tmp.path(), 1, &[0, 0], &[], &[], &[100]).unwrap();
+        save_graph(&conn, tmp.path(), 2, &[0, 1, 1], &[1], &[1.0], &[100, 200]).unwrap();
 
-        let (n, _, _) = load_graph(&conn).unwrap().unwrap();
+        let loaded = load_graph(&conn, tmp.path()).unwrap().unwrap();
+        let n = loaded.n;
         assert_eq!(n, 2);
     }
 }

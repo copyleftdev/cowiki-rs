@@ -111,6 +111,64 @@ impl ScoredGraph {
         Self::from_edges(n, &edges, costs)
     }
 
+    /// Build a graph directly from pre-assembled CSR arrays. Used by the
+    /// persistence layer to avoid any dense or edge-list intermediate on
+    /// load — the three Vecs are exactly what the struct stores.
+    ///
+    /// # Preconditions
+    /// - `row_ptr.len() == n + 1` and is monotone non-decreasing
+    /// - For each row, `col_idx[row_ptr[i]..row_ptr[i+1]]` is sorted, contains
+    ///   no duplicates, and has no self-reference (`col_idx[k] != i`)
+    /// - `values.len() == col_idx.len()`; all values are finite and > 0
+    /// - `costs.len() == n` and all costs > 0
+    ///
+    /// Panics on violation; the persistence path trusts its own sidecar
+    /// files, so the check is defensive-but-cheap.
+    pub fn from_raw_csr(
+        n: usize,
+        row_ptr: Vec<usize>,
+        col_idx: Vec<usize>,
+        raw_values: Vec<EdgeWeight>,
+        costs: Vec<u64>,
+    ) -> Self {
+        assert_eq!(row_ptr.len(), n + 1, "row_ptr must have n+1 entries");
+        assert_eq!(col_idx.len(), raw_values.len(), "col_idx and values length mismatch");
+        assert_eq!(costs.len(), n, "costs must have n elements");
+        assert!(costs.iter().all(|&c| c > 0), "costs must be positive");
+        assert!(raw_values.iter().all(|&w| w.is_finite() && w >= 0.0), "weights finite and non-negative");
+
+        // Normalise row sums and derive adj_values in a single pass.
+        let mut row_sum = vec![0.0f64; n];
+        let mut adj_values: Vec<EdgeWeight> = vec![0.0; raw_values.len()];
+        for i in 0..n {
+            let s = row_ptr[i];
+            let e = row_ptr[i + 1];
+            let sum: f64 = raw_values[s..e].iter().map(|&w| w as f64).sum();
+            row_sum[i] = sum;
+            if sum > 0.0 {
+                let inv = (1.0 / sum) as EdgeWeight;
+                for k in s..e { adj_values[k] = raw_values[k] * inv; }
+            }
+        }
+
+        let (adj_t_row_ptr, adj_t_col_idx, adj_t_values) =
+            build_transpose_from_forward(&row_ptr, &col_idx, &adj_values, n);
+
+        Self {
+            n,
+            raw_row_ptr: row_ptr,
+            raw_col_idx: col_idx,
+            raw_values,
+            adj_values,
+            row_sum,
+            adj_t_row_ptr,
+            adj_t_col_idx,
+            adj_t_values,
+            costs,
+            categories: vec![0; n],
+        }
+    }
+
     /// Build a graph directly from a sparse edge list. Self-loops are
     /// silently dropped; duplicate (src, dst) pairs are summed.
     ///
