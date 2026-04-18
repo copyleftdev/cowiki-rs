@@ -1,0 +1,38 @@
+[book]
+title = "cowiki-rs"
+authors = ["copyleftdev"]
+description = "A spreading-activation retrieval engine, its proofs, and the story of its first production corpus."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/copyleftdev/cowiki-rs"
+edit-url-template = "https://github.com/copyleftdev/cowiki-rs/edit/main/book/{path}"
+site-url = "/cowiki-rs/"
+additional-css = ["theme/overrides.css"]
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 3
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.playground]
+editable = false
+copy-js = true
+line-numbers = false
