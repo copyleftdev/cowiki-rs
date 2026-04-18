@@ -162,23 +162,32 @@ pub fn spread<T: ThresholdFn>(
     let one_minus_d = 1.0 - d;
     let (row_ptr, col_idx, values) = graph.adj_transpose_csr();
 
+    // Hoist scratch buffers: at ~100 iters per query and 2 fresh Vec::<f64>
+    // allocations per iter (next + thresholded), the old form dominated the
+    // allocator on short queries at scale. Ping-pong `current ⇄ next` via swap;
+    // `thresholded` is written unconditionally each iter.
     let mut current = initial.to_vec();
+    let mut next = vec![0.0f64; n];
+    let mut thresholded = vec![0.0f64; n];
     let mut residuals = Vec::with_capacity(config.max_iter);
 
     for _ in 0..config.max_iter {
-        let mut next = vec![0.0; n];
-
-        // Apply threshold to current activation.
-        let thresholded: Vec<f64> = current.iter().map(|&a| threshold.apply(a)).collect();
+        // Apply threshold to current activation (overwrite-in-place).
+        for (slot, &a) in thresholded.iter_mut().zip(current.iter()) {
+            *slot = threshold.apply(a);
+        }
 
         // Compute (Wᵀ · f(a))[j] = Σ_{k in row j of Wᵀ} values[k] · thresholded[col_idx[k]].
+        // Every cell of `next` is unconditionally assigned — no zero-init needed.
         // Sparse: skips the ~99% zeros in a typical wiki graph.
         for j in 0..n {
-            let mut spread_j = 0.0;
+            // Weights are f32; accumulate in f64 so rounding stays well below
+            // the Lipschitz bound.
+            let mut spread_j: f64 = 0.0;
             let start = row_ptr[j];
             let end = row_ptr[j + 1];
             for k in start..end {
-                spread_j += values[k] * thresholded[col_idx[k]];
+                spread_j += values[k] as f64 * thresholded[col_idx[k]];
             }
             next[j] = one_minus_d * initial[j] + d * spread_j;
         }
@@ -189,16 +198,18 @@ pub fn spread<T: ThresholdFn>(
             .sum();
         residuals.push(residual);
 
+        // Ping-pong: new state lives in `current` after the swap, old state
+        // (now in `next`) becomes the reusable scratch buffer.
+        std::mem::swap(&mut current, &mut next);
+
         if residual < config.epsilon {
             return SpreadResult {
-                activation: next,
+                activation: current,
                 iterations: residuals.len(),
                 residuals,
                 converged: true,
             };
         }
-
-        current = next;
     }
 
     SpreadResult {
@@ -246,11 +257,11 @@ fn one_step<T: ThresholdFn>(
 
     let mut next = vec![0.0; n];
     for j in 0..n {
-        let mut spread_j = 0.0;
+        let mut spread_j: f64 = 0.0;
         let start = row_ptr[j];
         let end = row_ptr[j + 1];
         for k in start..end {
-            spread_j += values[k] * thresholded[col_idx[k]];
+            spread_j += values[k] as f64 * thresholded[col_idx[k]];
         }
         next[j] = one_minus_d * initial[j] + d * spread_j;
     }

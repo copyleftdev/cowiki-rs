@@ -8,13 +8,19 @@
 
 use std::path::Path;
 
+use scored_graph::ScoredGraph;
+
 use crate::meta;
 use crate::store;
 use crate::tfidf::TfIdfIndex;
 use crate::types::*;
 
 /// Save the full wiki state: `.meta` files for humans, SQLite for the engine.
-pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
+///
+/// Weights are read live from the graph (no in-RAM duplicate in `WikiIndex`).
+/// The on-disk blob format stays f64 for forward/backward-compat with existing
+/// engine.db files; the conversion happens only at the save boundary.
+pub fn save(index: &WikiIndex, graph: &ScoredGraph, wiki_root: &Path) -> Result<(), WikiError> {
     // 1. Write companion .meta files (legible layer).
     meta::write_all_meta(&index.pages, wiki_root)?;
 
@@ -22,8 +28,12 @@ pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
     let mut conn = store::open_db(wiki_root)?;
     let n = index.pages.len();
 
+    // Promote f32 graph storage back to f64 for the on-disk blob. One pass,
+    // no residual held in RAM after the transaction commits.
+    let weights_f64: Vec<f64> = graph.raw_matrix().iter().map(|&w| w as f64).collect();
+
     let tx = conn.transaction()?;
-    store::save_graph(&tx, n, &index.raw_weights, &index.costs)?;
+    store::save_graph(&tx, n, &weights_f64, &index.costs)?;
     store::save_tfidf(&tx, &index.df, &index.tfidf_vectors)?;
     store::save_temporal(&tx, &index.temporal_state)?;
 
@@ -47,7 +57,10 @@ pub fn save(index: &WikiIndex, wiki_root: &Path) -> Result<(), WikiError> {
 }
 
 /// Load from SQLite. Returns `None` if no database exists.
-pub fn load(wiki_root: &Path) -> Result<Option<WikiIndex>, WikiError> {
+///
+/// The second element of the tuple is a `ScoredGraph` rebuilt from the
+/// persisted f64 weights (demoted to f32 inside `ScoredGraph::new`).
+pub fn load(wiki_root: &Path) -> Result<Option<(WikiIndex, ScoredGraph)>, WikiError> {
     let db_path = wiki_root.join(".cowiki/engine.db");
     if !db_path.exists() {
         return Ok(None);
@@ -55,11 +68,13 @@ pub fn load(wiki_root: &Path) -> Result<Option<WikiIndex>, WikiError> {
 
     let conn = store::open_db(wiki_root)?;
 
-    // Load graph.
-    let (n, raw_weights, costs) = match store::load_graph(&conn)? {
+    // Load graph weights + costs from SQLite (f64 on disk; demoted to f32 by
+    // `ScoredGraph::new`). The caller does not retain the f64 vec.
+    let (n, raw_weights_f64, costs) = match store::load_graph(&conn)? {
         Some(data) => data,
         None => return Ok(None),
     };
+    let graph = ScoredGraph::new(n, raw_weights_f64, costs.clone());
 
     // Load TF-IDF.
     let (df, tfidf_vectors) = store::load_tfidf(&conn, n)?;
@@ -80,15 +95,15 @@ pub fn load(wiki_root: &Path) -> Result<Option<WikiIndex>, WikiError> {
     let id_to_idx: std::collections::HashMap<String, usize> = load_meta_value(&conn, "id_to_idx")?
         .unwrap_or_default();
 
-    Ok(Some(WikiIndex {
+    let index = WikiIndex {
         pages,
         id_to_idx,
         df,
         tfidf_vectors,
         temporal_state,
-        raw_weights,
         costs,
-    }))
+    };
+    Ok(Some((index, graph)))
 }
 
 /// Convenience: check if a persisted state exists.
@@ -154,9 +169,12 @@ mod tests {
                 health_history: vec![0.9],
                 alive: vec![true],
             },
-            raw_weights: vec![0.0],
             costs: vec![25],
         }
+    }
+
+    fn dummy_graph() -> ScoredGraph {
+        ScoredGraph::new(1, vec![0.0], vec![25])
     }
 
     #[test]
@@ -167,8 +185,9 @@ mod tests {
 
         let mut index = dummy_index();
         index.pages[0].path = tmp.path().join("test.md");
+        let graph = dummy_graph();
 
-        save(&index, tmp.path()).unwrap();
+        save(&index, &graph, tmp.path()).unwrap();
 
         // Meta file should exist.
         assert!(tmp.path().join("test.meta").exists(), "Meta file not written");
@@ -180,12 +199,13 @@ mod tests {
         assert!(tmp.path().join(".cowiki/engine.db").exists(), "DB not written");
 
         // Load back.
-        let loaded = load(tmp.path()).unwrap().unwrap();
-        assert_eq!(loaded.pages.len(), 1);
-        assert_eq!(loaded.pages[0].title, "Test");
-        assert_eq!(loaded.temporal_state.time, 5);
-        assert_eq!(loaded.df["hello"], 1);
-        assert_eq!(loaded.costs, vec![25]);
+        let (loaded_idx, loaded_graph) = load(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded_idx.pages.len(), 1);
+        assert_eq!(loaded_idx.pages[0].title, "Test");
+        assert_eq!(loaded_idx.temporal_state.time, 5);
+        assert_eq!(loaded_idx.df["hello"], 1);
+        assert_eq!(loaded_idx.costs, vec![25]);
+        assert_eq!(loaded_graph.len(), 1);
     }
 
     #[test]

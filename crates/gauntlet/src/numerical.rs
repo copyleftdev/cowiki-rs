@@ -41,9 +41,13 @@ mod tests {
     }
 
     /// Graph with weights that sum to near-overflow before normalization.
+    ///
+    /// Sized to the storage type's limit (`f32`): `f32::MAX / (n·n)` still
+    /// exercises the "huge row sum, tiny quotient" path without producing
+    /// infinities when the f64 inputs are demoted at construction.
     fn near_overflow_graph(n: usize) -> ScoredGraph {
         let mut w = vec![0.0; n * n];
-        let huge = f64::MAX / (n as f64 * n as f64);
+        let huge = f32::MAX as f64 / (n as f64 * n as f64);
         for i in 0..n {
             for j in 0..n {
                 if i != j {

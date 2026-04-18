@@ -68,7 +68,6 @@ impl WikiBackend {
         };
 
         let index = WikiIndex {
-            raw_weights: g.raw_matrix().to_vec(),
             costs: g.costs().to_vec(),
             df: tfidf.df().clone(),
             tfidf_vectors: tfidf.vectors().to_vec(),
@@ -84,15 +83,14 @@ impl WikiBackend {
     pub fn open_or_rebuild(root: impl AsRef<Path>) -> Result<Self, WikiError> {
         let root_path = root.as_ref();
 
-        if let Some(saved) = persist::load(root_path)? {
-            let n = saved.pages.len();
-            let g = scored_graph::ScoredGraph::new(n, saved.raw_weights.clone(), saved.costs.clone());
-            let tfidf = TfIdfIndex::from_parts(n, saved.df.clone(), saved.tfidf_vectors.clone());
+        if let Some((index, graph)) = persist::load(root_path)? {
+            let n = index.pages.len();
+            let tfidf = TfIdfIndex::from_parts(n, index.df.clone(), index.tfidf_vectors.clone());
 
             Ok(Self {
                 root: root_path.canonicalize()?,
-                index: saved,
-                graph: g,
+                index,
+                graph,
                 tfidf,
             })
         } else {
@@ -159,7 +157,6 @@ impl WikiBackend {
 
         // Sync state back.
         self.index.temporal_state = SerializableTemporalState::from_temporal_state(&temporal);
-        self.index.raw_weights = self.graph.raw_matrix().to_vec();
 
         report
     }
@@ -189,7 +186,6 @@ impl WikiBackend {
         );
 
         self.index.temporal_state = SerializableTemporalState::from_temporal_state(&temporal);
-        self.index.raw_weights = self.graph.raw_matrix().to_vec();
 
         report
     }
@@ -226,7 +222,7 @@ impl WikiBackend {
 
     /// Persist current state to disk.
     pub fn save(&self) -> Result<(), WikiError> {
-        persist::save(&self.index, &self.root)
+        persist::save(&self.index, &self.graph, &self.root)
     }
 
     /// Number of pages in the wiki.

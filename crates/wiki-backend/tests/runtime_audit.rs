@@ -16,6 +16,13 @@
 //! Run with:
 //!   AUDIT_CORPUS=wiki-corpus/game-theory cargo test -p wiki-backend \
 //!     --test runtime_audit --release -- --ignored --nocapture
+//!
+//! For the seeded-fixture matrix (no external corpus needed):
+//!   cargo test -p wiki-backend --test runtime_audit --release \
+//!     fixture -- --ignored --nocapture
+//! or a single spec:
+//!   AUDIT_FIXTURE=star-100 cargo test -p wiki-backend --test runtime_audit \
+//!     --release fixtures -- --ignored --nocapture
 
 use std::path::PathBuf;
 
@@ -67,12 +74,12 @@ fn graph_structural_invariants() {
     }
 
     eprintln!("rows with edges        = {rows_with_edges}");
-    eprintln!("worst row-sum residual = {worst_row_residual:.3e} (tol 1e-12)");
+    eprintln!("worst row-sum residual = {worst_row_residual:.3e} (tol 1e-5 — f32 storage)");
     eprintln!("diagonal violations    = {diag_violations}");
     eprintln!("negative weights       = {neg_weights}");
     eprintln!("zero costs             = {zero_costs}");
 
-    assert!(worst_row_residual < 1e-12, "row-stochastic invariant violated");
+    assert!(worst_row_residual < 1e-5, "row-stochastic invariant violated");
     assert_eq!(diag_violations, 0);
     assert_eq!(neg_weights, 0);
     assert_eq!(zero_costs, 0);
@@ -210,7 +217,8 @@ fn sigmoid_contraction_and_envelope() {
     eprintln!("d·L1(a-b)  = {rhs:.6e}");
     eprintln!("ratio      = {:.4} (must be ≤ 1.0)", lhs / rhs);
     // Note: sigmoid shrinks near 0 → strict inequality expected on real data.
-    assert!(lhs <= rhs + 1e-12, "sigmoid contraction violated: {lhs} > {rhs}");
+    // f32 storage: relative slack ~1e-6 · rhs covers round-trip rounding error.
+    assert!(lhs <= rhs + 1e-6 * rhs.max(1.0), "sigmoid contraction violated: {lhs} > {rhs}");
 
     // Envelope: run to convergence with init = single spike, check r_t ≤ r_0·d^t · (1+ε).
     let mut init = vec![0.0; n];
@@ -297,4 +305,196 @@ fn knapsack_edge_cases() {
     eprintln!("budget=10x sum: n={}, total_cost={} (sum_costs={})",
               r.pages.len(), r.total_cost, sum_costs);
     assert!(r.total_cost <= sum_costs * 10);
+}
+
+// ─── Seeded-fixture matrix (no external corpus) ────────────────────────────
+
+/// Shared invariant check for a built fixture. Returns a one-line summary.
+fn audit_fixture(spec: &str) -> String {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_corpus::build(spec, tmp.path()).expect("build fixture");
+
+    let wiki = WikiBackend::open(tmp.path()).expect("open built fixture");
+    let g = wiki.graph();
+    let n = g.len();
+
+    // (1) Row-stochasticity.
+    let mut worst_residual: f64 = 0.0;
+    let mut rows_with_edges = 0usize;
+    for i in 0..n {
+        let has = (0..n).any(|j| g.raw_weight(i, j) > 0.0);
+        if has {
+            rows_with_edges += 1;
+            let s: f64 = (0..n).map(|j| g.adj(i, j)).sum();
+            worst_residual = worst_residual.max((s - 1.0).abs());
+        }
+        // (2) No self-loops, positive costs.
+        assert_eq!(g.raw_weight(i, i), 0.0, "{spec}: self-loop at {i}");
+        assert!(g.cost(i) > 0, "{spec}: zero cost at {i}");
+    }
+    assert!(worst_residual < 1e-5, "{spec}: row-stochastic residual {worst_residual:.3e}");
+    assert!(g.is_row_stochastic());
+
+    // (3) Budget respected across a sweep.
+    let cfg = SpreadConfig::default();
+    let query = "wiki node graph retrieval";
+    for &b in &[0u64, 1, 100, 10_000, 10_000_000] {
+        let r = wiki.retrieve(query, b, &cfg);
+        assert!(r.total_cost <= b, "{spec}: budget {b} violated: cost={}", r.total_cost);
+    }
+
+    // (4) Convergence-flag honesty. Epsilon is bounded below by the f32
+    //     storage floor on the SpMV (values cast to f64 on read, but input
+    //     precision is ~1e-7 per edge) × nnz.
+    let eps = 1e-8_f64;
+    let a0 = wiki.ignite(query);
+    let sp = activate(g, &a0, &SigmoidThreshold::default(),
+        &SpreadConfig { d: 0.8, max_iter: 200, epsilon: eps });
+    if sp.converged {
+        let final_r = sp.residuals.last().copied().unwrap();
+        assert!(final_r < eps, "{spec}: converged=true but residual={final_r:.3e}");
+    } else {
+        assert_eq!(sp.iterations, 200, "{spec}: not-converged but iterations<max_iter");
+    }
+
+    // (5) Sigmoid contraction on one random pair of states.
+    let a: Vec<f64> = (0..n).map(|i| ((i * 2654435761) % 1000) as f64 / 1000.0).collect();
+    let b: Vec<f64> = (0..n).map(|i| (((i + 7) * 2654435761) % 1000) as f64 / 1000.0).collect();
+    let one_step = |v: &[f64]| activate(g, v, &SigmoidThreshold::default(),
+        &SpreadConfig { d: 0.8, max_iter: 1, epsilon: 0.0 }).activation;
+    let ta = one_step(&a);
+    let tb = one_step(&b);
+    let lhs: f64 = ta.iter().zip(tb.iter()).map(|(x, y)| (x - y).abs()).sum();
+    let rhs: f64 = 0.8 * a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum::<f64>();
+    // f32 storage: relative slack of ~1e-6 · rhs covers round-trip rounding.
+    assert!(lhs <= rhs + 1e-6 * rhs.max(1.0), "{spec}: contraction violated {lhs:.3e} > {rhs:.3e}");
+
+    // (6) Knapsack ≥½ OPT via DP — only where DP is affordable.
+    //     DP is O(n · B) in time and O(B) in memory.
+    let mut greedy_opt_ratio: f64 = 1.0;
+    if n <= 2_000 {
+        let items: Vec<Item> = sp.activation.iter().enumerate()
+            .map(|(i, &s)| Item { score: s, cost: g.cost(i) }).collect();
+        let sel = select(&items, 4_000);
+        let (opt, _) = optimal_dp(&items, 4_000);
+        if opt > 0.0 { greedy_opt_ratio = sel.total_score / opt; }
+        assert!(greedy_opt_ratio >= 0.5 - 1e-9,
+                "{spec}: ≥½ OPT violated: ratio={greedy_opt_ratio}");
+    }
+
+    format!(
+        "{spec:<16} n={n:<6} live_rows={rows_with_edges:<5} \
+         row_resid={worst_residual:.1e}  iters={:<3} conv={}  greedy/opt={:.3}",
+        sp.iterations, sp.converged, greedy_opt_ratio,
+    )
+}
+
+#[test]
+#[ignore]
+fn fixtures() {
+    banner("seeded-fixture matrix");
+    let specs: Vec<String> = match std::env::var("AUDIT_FIXTURE") {
+        Ok(s) => vec![s],
+        Err(_) => [
+            // correctness fixtures (small, weird shapes)
+            "star-10", "star-100",
+            "chain-10", "chain-100",
+            "ba-50-3", "ba-200-4", "ba-500-6",
+        ].iter().map(|s| s.to_string()).collect(),
+    };
+    for spec in &specs {
+        let line = audit_fixture(spec);
+        eprintln!("  {line}");
+    }
+    eprintln!("\n{} fixtures passed", specs.len());
+}
+
+// ─── Scale-envelope fixtures: record performance, don't regress it ──────────
+//
+// Build time, query p99, and RSS at increasing n. These are *characterization*
+// tests — they print a budget sheet and only fail on gross regressions, so
+// future refactors (mmap-CSR, inverted-index TF-IDF, segment shards) have a
+// hard baseline to prove against.
+
+fn rss_mb() -> u64 {
+    // /proc/self/statm: "size rss shared text lib data dirty" (in pages).
+    let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+    let rss_pages: u64 = s.split_whitespace().nth(1)
+        .and_then(|x| x.parse().ok()).unwrap_or(0);
+    rss_pages * 4 / 1024 // assume 4 KiB pages → MiB
+}
+
+fn nearest_rank(sorted: &[u64], p: usize) -> u64 {
+    let n = sorted.len();
+    let idx = ((p * n + 99) / 100).saturating_sub(1).min(n - 1);
+    sorted[idx]
+}
+
+#[test]
+#[ignore]
+fn fixtures_scale() {
+    use std::time::Instant;
+    banner("scale-envelope");
+    eprintln!(
+        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>8} {:>10} {:>8}",
+        "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "iters", "rss_mb_Δ", "conv%"
+    );
+
+    // Default ladder. Opt-in heavier rungs with AUDIT_SCALE=heavy.
+    let heavy = std::env::var("AUDIT_SCALE").ok().as_deref() == Some("heavy");
+    let mut specs: Vec<&str> = vec!["ba-1000-4", "ba-2500-6", "ba-5000-6"];
+    if heavy {
+        specs.push("ba-10000-8");
+        specs.push("ba-25000-8");
+    }
+
+    let rss_before = rss_mb();
+
+    for spec in &specs {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        seed_corpus::build(spec, tmp.path()).expect("build fixture");
+
+        let t_open = Instant::now();
+        let wiki = WikiBackend::open(tmp.path()).expect("open built fixture");
+        let build_idx_ms = t_open.elapsed().as_millis();
+        let n = wiki.len();
+
+        let cfg = SpreadConfig { d: 0.8, max_iter: 200, epsilon: 1e-8 };
+        let query = "wiki node graph retrieval activation";
+
+        // Warmup and inner retrieval loop.
+        let _ = wiki.retrieve(query, 4_000, &cfg);
+        let trials = 100;
+        let mut lats = Vec::with_capacity(trials);
+        let mut iters_total: u64 = 0;
+        let mut conv_count: u64 = 0;
+        for _ in 0..trials {
+            let t = Instant::now();
+            let r = wiki.retrieve(query, 4_000, &cfg);
+            let us = t.elapsed().as_micros() as u64;
+            lats.push(us);
+            iters_total += r.iterations as u64;
+            if r.converged { conv_count += 1; }
+            std::hint::black_box(&r);
+        }
+        lats.sort();
+
+        let p50 = nearest_rank(&lats, 50);
+        let p99 = nearest_rank(&lats, 99);
+        let iters_avg = iters_total as f64 / trials as f64;
+        let conv_pct = 100.0 * conv_count as f64 / trials as f64;
+        let rss_delta = rss_mb().saturating_sub(rss_before);
+
+        eprintln!(
+            "{spec:<14} {n:>6} {build_idx_ms:>12} {p50:>10} {p99:>10} \
+             {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
+        );
+
+        // Sanity floor — these don't set a tight budget, they catch regressions
+        // of >10× that something plainly broke. Tighten once we're ready.
+        assert!(p99 < 5_000_000, "{spec}: query p99 {p99} µs exceeds 5 s sanity floor");
+        assert!(build_idx_ms < 300_000, "{spec}: index build {build_idx_ms} ms exceeds 5 min sanity floor");
+    }
+
+    eprintln!("\n(AUDIT_SCALE=heavy to include 10k / 25k rungs)");
 }

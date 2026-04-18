@@ -901,6 +901,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seed-corpus"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1384,6 +1391,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "scored-graph",
+ "seed-corpus",
  "serde",
  "serde_json",
  "spread",

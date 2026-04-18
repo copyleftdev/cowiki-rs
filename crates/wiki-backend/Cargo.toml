@@ -24,6 +24,7 @@ optional = true
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = "3"
+seed-corpus = { path = "../seed-corpus" }
 
 [[bin]]
 name = "profile_harness"

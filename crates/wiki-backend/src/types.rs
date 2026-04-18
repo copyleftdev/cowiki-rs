@@ -61,6 +61,12 @@ impl SerializableTemporalState {
 }
 
 /// The persistent wiki index.
+///
+/// Note: raw edge weights live in `ScoredGraph` only — this index used to keep
+/// a `Vec<f64>` duplicate for persistence, but that doubled RAM on the dense
+/// n² layer. Persistence now pulls weights directly from the graph at save
+/// time (see `persist::save`), and load reconstructs a `ScoredGraph` alongside
+/// this index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiIndex {
     pub pages: Vec<PageMeta>,
@@ -68,7 +74,6 @@ pub struct WikiIndex {
     pub df: HashMap<String, usize>,
     pub tfidf_vectors: Vec<HashMap<String, f64>>,
     pub temporal_state: SerializableTemporalState,
-    pub raw_weights: Vec<f64>,
     pub costs: Vec<u64>,
 }
 

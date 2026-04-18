@@ -27,19 +27,26 @@ use std::collections::VecDeque;
 /// hot loop — the operator is `T(a) = (1-d)·a⁰ + d·Wᵀ·f(a)`, so iterating by
 /// columns of W (== rows of Wᵀ) against sparse edges is the cache-friendly,
 /// arithmetic-minimal form.
+/// Edge-weight storage type. `f32` halves the dense-matrix footprint vs `f64`
+/// (so n² storage tops out at `4 · n²` bytes, not `8 · n²`). Spread accumulates
+/// SpMV contributions in `f64` to keep rounding error well below the Lipschitz
+/// bound of the operator; row-stochastic tolerance in [`Self::is_row_stochastic`]
+/// is relaxed to match the ~7-digit f32 mantissa.
+pub type EdgeWeight = f32;
+
 #[derive(Debug, Clone)]
 pub struct ScoredGraph {
     /// Number of nodes.
     n: usize,
     /// Raw (unnormalized) weight matrix, row-major: `raw[i * n + j]` = weight of edge i → j.
-    raw: Vec<f64>,
+    raw: Vec<EdgeWeight>,
     /// Row-stochastic adjacency: `adj[i * n + j]` = `raw[i,j] / Σ_k raw[i,k]`.
-    adj: Vec<f64>,
+    adj: Vec<EdgeWeight>,
     /// CSR transpose of `adj`: rows are columns of W. `adj_t_row_ptr[j+1] - adj_t_row_ptr[j]`
     /// is the in-degree of node j.
     adj_t_row_ptr: Vec<usize>,
     adj_t_col_idx: Vec<usize>,
-    adj_t_values:  Vec<f64>,
+    adj_t_values:  Vec<EdgeWeight>,
     /// Token cost per node. Must be > 0 for all nodes.
     costs: Vec<u64>,
     /// Category bitset per node (simple: just a `Vec<u64>` used as a bitfield).
@@ -60,8 +67,8 @@ impl ScoredGraph {
         assert!(weights.iter().all(|&w| w >= 0.0), "weights must be non-negative");
         assert!(costs.iter().all(|&c| c > 0), "costs must be positive");
 
-        // Zero out diagonal (no self-loops).
-        let mut raw = weights;
+        // Demote to f32 and zero the diagonal.
+        let mut raw: Vec<EdgeWeight> = weights.iter().map(|&w| w as EdgeWeight).collect();
         for i in 0..n {
             raw[i * n + i] = 0.0;
         }
@@ -101,16 +108,17 @@ impl ScoredGraph {
         self.n == 0
     }
 
-    /// Row-stochastic adjacency value W[i][j].
+    /// Row-stochastic adjacency value W[i][j]. Returned as `f64` for caller
+    /// ergonomics; storage is `f32`, so the cast is free.
     #[inline]
     pub fn adj(&self, i: usize, j: usize) -> f64 {
-        self.adj[i * self.n + j]
+        self.adj[i * self.n + j] as f64
     }
 
-    /// Raw (unnormalized) weight of edge i → j.
+    /// Raw (unnormalized) weight of edge i → j. See [`Self::adj`] for the f32/f64 note.
     #[inline]
     pub fn raw_weight(&self, i: usize, j: usize) -> f64 {
-        self.raw[i * self.n + j]
+        self.raw[i * self.n + j] as f64
     }
 
     /// Token cost of node v.
@@ -126,30 +134,32 @@ impl ScoredGraph {
     }
 
     /// Full row-stochastic adjacency matrix as a flat slice (row-major).
+    /// Storage is `f32` — accumulate in `f64` when summing many entries.
     #[inline]
-    pub fn adj_matrix(&self) -> &[f64] {
+    pub fn adj_matrix(&self) -> &[EdgeWeight] {
         &self.adj
     }
 
     /// CSR-encoded transpose of the row-stochastic adjacency. Tuple is
     /// `(row_ptr, col_idx, values)` where for column `j` of W (row `j` of Wᵀ):
     /// `col_idx[row_ptr[j]..row_ptr[j+1]]` are source node indices and
-    /// `values[...]` are the edge weights. Sized by edge count, not n².
+    /// `values[...]` are the edge weights (`f32`; accumulate in `f64`).
+    /// Sized by edge count, not n².
     #[inline]
-    pub fn adj_transpose_csr(&self) -> (&[usize], &[usize], &[f64]) {
+    pub fn adj_transpose_csr(&self) -> (&[usize], &[usize], &[EdgeWeight]) {
         (&self.adj_t_row_ptr, &self.adj_t_col_idx, &self.adj_t_values)
     }
 
     /// Full raw weight matrix as a flat slice (row-major).
     #[inline]
-    pub fn raw_matrix(&self) -> &[f64] {
+    pub fn raw_matrix(&self) -> &[EdgeWeight] {
         &self.raw
     }
 
     /// Mutable access to the raw weight matrix. Caller must call
-    /// [`renormalize`](Self::renormalize) after modification.
+    /// [`renormalize`](Self::renormalize) after modification. Weights are `f32`.
     #[inline]
-    pub fn raw_matrix_mut(&mut self) -> &mut [f64] {
+    pub fn raw_matrix_mut(&mut self) -> &mut [EdgeWeight] {
         &mut self.raw
     }
 
@@ -171,6 +181,14 @@ impl ScoredGraph {
     /// Incoming neighbors of node `v` (nodes that link to `v`).
     pub fn neighbors_in(&self, v: usize) -> Vec<usize> {
         (0..self.n).filter(|&i| self.raw[i * self.n + v] > 0.0).collect()
+    }
+
+    /// Iterate (i, j, weight) triples for every positive raw edge, accumulating
+    /// the row sum in f64 to preserve precision across many entries.
+    #[allow(dead_code)]
+    fn row_sum_f64(&self, i: usize) -> f64 {
+        let row = &self.adj[i * self.n..(i + 1) * self.n];
+        row.iter().map(|&w| w as f64).sum()
     }
 
     /// BFS shortest path length from `src` to `dst`. Returns `None` if unreachable.
@@ -198,11 +216,16 @@ impl ScoredGraph {
     }
 
     /// Verify the row-stochastic invariant: every row with outgoing edges sums to 1.0.
+    ///
+    /// Tolerance is scaled for f32 storage: the row sum is accumulated in f64,
+    /// but the per-edge rounding floor is ~1e-7 — with up to n nonzeros per row,
+    /// the worst-case residual grows linearly. 1e-5 comfortably covers
+    /// n ≤ 100 000 while still catching any structural violation.
     pub fn is_row_stochastic(&self) -> bool {
         for i in 0..self.n {
-            let sum: f64 = (0..self.n).map(|j| self.adj[i * self.n + j]).sum();
+            let sum: f64 = (0..self.n).map(|j| self.adj[i * self.n + j] as f64).sum();
             let has_edges = (0..self.n).any(|j| self.raw[i * self.n + j] > 0.0);
-            if has_edges && (sum - 1.0).abs() > 1e-9 {
+            if has_edges && (sum - 1.0).abs() > 1e-5 {
                 return false;
             }
         }
@@ -211,15 +234,17 @@ impl ScoredGraph {
 }
 
 /// Row-stochastic normalization: each row sums to 1.
-/// Rows with zero out-degree remain all zeros.
-fn row_stochastize(raw: &[f64], n: usize) -> Vec<f64> {
+/// Rows with zero out-degree remain all zeros. Sum is accumulated in f64 to
+/// keep precision when n is large; the divide writes back as f32.
+fn row_stochastize(raw: &[EdgeWeight], n: usize) -> Vec<EdgeWeight> {
     let mut adj = raw.to_vec();
     for i in 0..n {
         let row_start = i * n;
-        let row_sum: f64 = adj[row_start..row_start + n].iter().sum();
+        let row_sum: f64 = adj[row_start..row_start + n].iter().map(|&w| w as f64).sum();
         if row_sum > 0.0 {
+            let inv = (1.0 / row_sum) as EdgeWeight;
             for j in 0..n {
-                adj[row_start + j] /= row_sum;
+                adj[row_start + j] *= inv;
             }
         }
     }
@@ -231,28 +256,24 @@ fn row_stochastize(raw: &[f64], n: usize) -> Vec<f64> {
 /// `next[j] = Σ_i W[i][j] · f(a[i])` which is exactly a row-sweep in Wᵀ.
 ///
 /// Returns `(row_ptr[n+1], col_idx[nnz], values[nnz])`.
-fn build_csr_transpose(adj: &[f64], n: usize) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+fn build_csr_transpose(adj: &[EdgeWeight], n: usize) -> (Vec<usize>, Vec<usize>, Vec<EdgeWeight>) {
     if n == 0 {
         return (vec![0], Vec::new(), Vec::new());
     }
-    // Count non-zeros per column of W.
     let mut col_counts = vec![0usize; n];
     for i in 0..n {
         let row = &adj[i * n..(i + 1) * n];
         for (j, &w) in row.iter().enumerate() {
-            if w > 0.0 {
-                col_counts[j] += 1;
-            }
+            if w > 0.0 { col_counts[j] += 1; }
         }
     }
-    // Exclusive prefix sum → row_ptr for Wᵀ.
     let mut row_ptr = vec![0usize; n + 1];
     for j in 0..n {
         row_ptr[j + 1] = row_ptr[j] + col_counts[j];
     }
     let nnz = row_ptr[n];
     let mut col_idx = vec![0usize; nnz];
-    let mut values  = vec![0.0f64; nnz];
+    let mut values: Vec<EdgeWeight> = vec![0.0; nnz];
     let mut fill    = vec![0usize; n];
     for i in 0..n {
         let row = &adj[i * n..(i + 1) * n];
@@ -285,8 +306,9 @@ mod tests {
         );
         assert_eq!(g.len(), 3);
         assert!(g.is_row_stochastic());
-        assert!((g.adj(0, 1) - 1.0 / 3.0).abs() < 1e-9);
-        assert!((g.adj(0, 2) - 2.0 / 3.0).abs() < 1e-9);
+        // f32 mantissa ≈ 7 digits; tolerance is loosened to match the storage precision.
+        assert!((g.adj(0, 1) - 1.0 / 3.0).abs() < 1e-6);
+        assert!((g.adj(0, 2) - 2.0 / 3.0).abs() < 1e-6);
         assert_eq!(g.cost(1), 200);
     }
 

@@ -10,6 +10,7 @@ members = [
     "crates/gauntlet",
     "crates/wiki-backend",
     "crates/cowiki-server",
+    "crates/seed-corpus",
 ]
 
 [workspace.dependencies]

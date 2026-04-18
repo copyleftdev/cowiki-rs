@@ -107,7 +107,7 @@ pub fn decay(graph: &mut ScoredGraph, state: &TemporalState, decay_rate: f64) {
 
     for i in 0..n {
         let r = state.recency(i) as f64;
-        let factor = (-decay_rate * r).exp();
+        let factor = (-decay_rate * r).exp() as f32;
         for j in 0..n {
             raw[i * n + j] *= factor;
         }
@@ -323,7 +323,7 @@ where
         let edges = dream_candidates(graph, state, 0.5, sim);
         let raw = graph.raw_matrix_mut();
         for &(src, dst) in &edges {
-            raw[src * n + dst] = 0.5;
+            raw[src * n + dst] = 0.5_f32;
         }
         if !edges.is_empty() {
             graph.renormalize();
@@ -436,8 +436,8 @@ mod proptests {
                 state.last_access[i] = 20u64.saturating_sub(i as u64 + 1);
             }
 
-            // Snapshot original weights.
-            let orig: Vec<f64> = g.raw_matrix().to_vec();
+            // Snapshot original weights (f32 storage; compare in f64).
+            let orig: Vec<f32> = g.raw_matrix().to_vec();
 
             decay(&mut g, &state, decay_rate);
 
@@ -445,9 +445,10 @@ mod proptests {
                 let r = state.recency(i) as f64;
                 let factor = (-decay_rate * r).exp();
                 for j in 0..n {
-                    let expected = orig[i * n + j] * factor;
+                    let expected = orig[i * n + j] as f64 * factor;
                     let actual = g.raw_weight(i, j);
-                    prop_assert!((actual - expected).abs() < 1e-9,
+                    // Relaxed tolerance for f32 storage (~1e-7 rounding per op).
+                    prop_assert!((actual - expected).abs() < 1e-5,
                         "Decay mismatch at ({i},{j}): got {actual}, expected {expected}");
                 }
             }
@@ -468,15 +469,15 @@ mod proptests {
             state.last_access[0] = 9;  // recency = 1
             state.last_access[1] = 2;  // recency = 8
 
-            let orig: Vec<f64> = g.raw_matrix().to_vec();
+            let orig: Vec<f32> = g.raw_matrix().to_vec();
 
             decay(&mut g, &state, decay_rate);
 
             for j in 0..n {
                 if orig[j] > 0.0 && orig[n + j] > 0.0 {
-                    let ratio_0 = g.raw_weight(0, j) / orig[j];
-                    let ratio_1 = g.raw_weight(1, j) / orig[n + j];
-                    prop_assert!(ratio_0 >= ratio_1 - 1e-9,
+                    let ratio_0 = g.raw_weight(0, j) / orig[j] as f64;
+                    let ratio_1 = g.raw_weight(1, j) / orig[n + j] as f64;
+                    prop_assert!(ratio_0 >= ratio_1 - 1e-6,
                         "Recent node decayed more: {ratio_0} < {ratio_1}");
                 }
             }
