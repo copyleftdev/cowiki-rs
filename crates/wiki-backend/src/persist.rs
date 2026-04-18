@@ -28,9 +28,19 @@ pub fn save(index: &WikiIndex, graph: &ScoredGraph, wiki_root: &Path) -> Result<
     let mut conn = store::open_db(wiki_root)?;
     let n = index.pages.len();
 
-    // Promote f32 graph storage back to f64 for the on-disk blob. One pass,
-    // no residual held in RAM after the transaction commits.
-    let weights_f64: Vec<f64> = graph.raw_matrix().iter().map(|&w| w as f64).collect();
+    // Promote f32 graph storage back to f64 for the on-disk blob. On-disk
+    // format is still dense n² (for back-compat with existing engine.db
+    // files); materialise it from the sparse CSR just long enough to write
+    // the blob, then drop.
+    let n_usize = n;
+    let (rp, ci, v) = graph.raw_csr_forward();
+    let mut weights_f64 = vec![0.0f64; n_usize * n_usize];
+    for src in 0..n_usize {
+        for k in rp[src]..rp[src + 1] {
+            let dst = ci[k];
+            weights_f64[src * n_usize + dst] = v[k] as f64;
+        }
+    }
 
     let tx = conn.transaction()?;
     store::save_graph(&tx, n, &weights_f64, &index.costs)?;

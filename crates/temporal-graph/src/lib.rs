@@ -103,16 +103,11 @@ pub struct HealthReport {
 /// - Follows exact exponential formula
 pub fn decay(graph: &mut ScoredGraph, state: &TemporalState, decay_rate: f64) {
     let n = graph.len();
-    let raw = graph.raw_matrix_mut();
-
     for i in 0..n {
         let r = state.recency(i) as f64;
         let factor = (-decay_rate * r).exp() as f32;
-        for j in 0..n {
-            raw[i * n + j] *= factor;
-        }
+        graph.scale_row(i, factor);
     }
-
     graph.renormalize();
 }
 
@@ -321,9 +316,8 @@ where
     // 5. Dream.
     let dreamed_edges = if let Some(sim) = similarity {
         let edges = dream_candidates(graph, state, 0.5, sim);
-        let raw = graph.raw_matrix_mut();
         for &(src, dst) in &edges {
-            raw[src * n + dst] = 0.5_f32;
+            graph.set_edge(src, dst, 0.5_f32);
         }
         if !edges.is_empty() {
             graph.renormalize();
@@ -332,6 +326,7 @@ where
     } else {
         vec![]
     };
+    let _ = n; // `n` was used by the old dense-matrix write path; retained for scope clarity.
 
     // 6. Health.
     let health = graph_health(graph, state, config);
@@ -436,21 +431,25 @@ mod proptests {
                 state.last_access[i] = 20u64.saturating_sub(i as u64 + 1);
             }
 
-            // Snapshot original weights (f32 storage; compare in f64).
-            let orig: Vec<f32> = g.raw_matrix().to_vec();
+            // Snapshot original sparse weights (CSR forward).
+            let orig: Vec<(usize, usize, f32)> = {
+                let (rp, ci, v) = g.raw_csr_forward();
+                let mut out = Vec::with_capacity(v.len());
+                for i in 0..n {
+                    for k in rp[i]..rp[i + 1] { out.push((i, ci[k], v[k])); }
+                }
+                out
+            };
 
             decay(&mut g, &state, decay_rate);
 
-            for i in 0..n {
-                let r = state.recency(i) as f64;
+            for (i, j, w0) in &orig {
+                let r = state.recency(*i) as f64;
                 let factor = (-decay_rate * r).exp();
-                for j in 0..n {
-                    let expected = orig[i * n + j] as f64 * factor;
-                    let actual = g.raw_weight(i, j);
-                    // Relaxed tolerance for f32 storage (~1e-7 rounding per op).
-                    prop_assert!((actual - expected).abs() < 1e-5,
-                        "Decay mismatch at ({i},{j}): got {actual}, expected {expected}");
-                }
+                let expected = *w0 as f64 * factor;
+                let actual = g.raw_weight(*i, *j);
+                prop_assert!((actual - expected).abs() < 1e-5,
+                    "Decay mismatch at ({i},{j}): got {actual}, expected {expected}");
             }
         }
 
@@ -469,16 +468,28 @@ mod proptests {
             state.last_access[0] = 9;  // recency = 1
             state.last_access[1] = 2;  // recency = 8
 
-            let orig: Vec<f32> = g.raw_matrix().to_vec();
+            // Snapshot node-0 and node-1 outgoing edges before decay.
+            let orig_0: Vec<(usize, f32)> = {
+                let (rp, ci, v) = g.raw_csr_forward();
+                (rp[0]..rp[1]).map(|k| (ci[k], v[k])).collect()
+            };
+            let orig_1: Vec<(usize, f32)> = {
+                let (rp, ci, v) = g.raw_csr_forward();
+                (rp[1]..rp[2]).map(|k| (ci[k], v[k])).collect()
+            };
 
             decay(&mut g, &state, decay_rate);
 
-            for j in 0..n {
-                if orig[j] > 0.0 && orig[n + j] > 0.0 {
-                    let ratio_0 = g.raw_weight(0, j) / orig[j] as f64;
-                    let ratio_1 = g.raw_weight(1, j) / orig[n + j] as f64;
-                    prop_assert!(ratio_0 >= ratio_1 - 1e-6,
-                        "Recent node decayed more: {ratio_0} < {ratio_1}");
+            // For each target j reachable from both node 0 and node 1, compare
+            // decay ratios. Recent node (0) should decay ≤ stale node (1).
+            for (j0, w0) in &orig_0 {
+                if let Some((_, w1)) = orig_1.iter().find(|(j1, _)| j1 == j0) {
+                    if *w0 > 0.0 && *w1 > 0.0 {
+                        let ratio_0 = g.raw_weight(0, *j0) / *w0 as f64;
+                        let ratio_1 = g.raw_weight(1, *j0) / *w1 as f64;
+                        prop_assert!(ratio_0 >= ratio_1 - 1e-6,
+                            "Recent node decayed more: {ratio_0} < {ratio_1}");
+                    }
                 }
             }
         }

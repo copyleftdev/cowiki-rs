@@ -15,16 +15,19 @@ use crate::types::PageMeta;
 pub fn build_graph(pages: &[PageMeta], id_to_idx: &HashMap<String, usize>) -> ScoredGraph {
     let n = pages.len();
     if n == 0 {
-        return ScoredGraph::new(0, vec![], vec![]);
+        return ScoredGraph::from_edges(0, &[], vec![]);
     }
 
-    let mut weights = vec![0.0; n * n];
-
+    // Sparse edge list, O(sum of out-degrees) — no n² allocation. At BA density
+    // on 25k pages this is ~200k entries vs 625M dense cells.
+    let mut edges: Vec<(usize, usize, f32)> = Vec::with_capacity(
+        pages.iter().map(|p| p.links_to.len()).sum()
+    );
     for (i, page) in pages.iter().enumerate() {
         for link in &page.links_to {
             if let Some(&j) = id_to_idx.get(&link.0) {
                 if i != j {
-                    weights[i * n + j] = 1.0;
+                    edges.push((i, j, 1.0));
                 }
             }
             // Dangling links silently skipped.
@@ -32,8 +35,7 @@ pub fn build_graph(pages: &[PageMeta], id_to_idx: &HashMap<String, usize>) -> Sc
     }
 
     let costs: Vec<u64> = pages.iter().map(|p| p.token_cost).collect();
-
-    ScoredGraph::new(n, weights, costs)
+    ScoredGraph::from_edges(n, &edges, costs)
 }
 
 #[cfg(test)]

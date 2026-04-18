@@ -436,16 +436,19 @@ fn fixtures_scale() {
     use std::time::Instant;
     banner("scale-envelope");
     eprintln!(
-        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>8} {:>10} {:>8}",
-        "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "iters", "rss_mb_Δ", "conv%"
+        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>10} {:>8} {:>10} {:>8}",
+        "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "rebuild_ms", "iters", "rss_mb_Δ", "conv%"
     );
 
     // Default ladder. Opt-in heavier rungs with AUDIT_SCALE=heavy.
     let heavy = std::env::var("AUDIT_SCALE").ok().as_deref() == Some("heavy");
-    let mut specs: Vec<&str> = vec!["ba-1000-4", "ba-2500-6", "ba-5000-6"];
+    // Clique runs alongside BA to surface the dense-vs-CSR crossover: clique-N
+    // has n(n-1) edges so it's the worst case for sparse storage.
+    let mut specs: Vec<&str> = vec!["ba-1000-4", "ba-2500-6", "ba-5000-6", "clique-200"];
     if heavy {
         specs.push("ba-10000-8");
         specs.push("ba-25000-8");
+        specs.push("clique-500");
     }
 
     let rss_before = rss_mb();
@@ -455,7 +458,7 @@ fn fixtures_scale() {
         seed_corpus::build(spec, tmp.path()).expect("build fixture");
 
         let t_open = Instant::now();
-        let wiki = WikiBackend::open(tmp.path()).expect("open built fixture");
+        let mut wiki = WikiBackend::open(tmp.path()).expect("open built fixture");
         let build_idx_ms = t_open.elapsed().as_millis();
         let n = wiki.len();
 
@@ -479,6 +482,15 @@ fn fixtures_scale() {
         }
         lats.sort();
 
+        // Write-path cost: create one new page. This triggers the full
+        // rebuild() — currently O(n) — which is the dominant cost of any
+        // edit on the wiki. Future incremental-rebuild work should drive
+        // this column down.
+        let page_id = wiki_backend::types::PageId(format!("audit-probe-{spec}"));
+        let t_rb = Instant::now();
+        wiki.create_page(&page_id, "probe", "Just a probe [[page-0]].").unwrap();
+        let rebuild_ms = t_rb.elapsed().as_millis();
+
         let p50 = nearest_rank(&lats, 50);
         let p99 = nearest_rank(&lats, 99);
         let iters_avg = iters_total as f64 / trials as f64;
@@ -487,7 +499,7 @@ fn fixtures_scale() {
 
         eprintln!(
             "{spec:<14} {n:>6} {build_idx_ms:>12} {p50:>10} {p99:>10} \
-             {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
+             {rebuild_ms:>10} {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
         );
 
         // Sanity floor — these don't set a tight budget, they catch regressions

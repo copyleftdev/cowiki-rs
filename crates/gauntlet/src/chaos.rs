@@ -236,8 +236,7 @@ pub fn vopr_run(seed: u64, n: usize, n_steps: usize) -> Result<(), String> {
                 let src = rng.next_usize(n);
                 let dst = rng.next_usize(n);
                 if src != dst {
-                    let raw = graph.raw_matrix_mut();
-                    raw[src * n + dst] = (rng.next_f64() * 2.0) as f32;
+                    graph.set_edge(src, dst, (rng.next_f64() * 2.0) as f32);
                     graph.renormalize();
                 }
                 check_invariants(&graph, &label)?;
@@ -247,8 +246,7 @@ pub fn vopr_run(seed: u64, n: usize, n_steps: usize) -> Result<(), String> {
                 let src = rng.next_usize(n);
                 let dst = rng.next_usize(n);
                 if src != dst {
-                    let raw = graph.raw_matrix_mut();
-                    raw[src * n + dst] = 0.0;
+                    graph.set_edge(src, dst, 0.0);
                     graph.renormalize();
                 }
                 check_invariants(&graph, &label)?;
@@ -264,8 +262,9 @@ pub fn vopr_run(seed: u64, n: usize, n_steps: usize) -> Result<(), String> {
                         2 => 1e6,                      // very large
                         _ => rng.next_f64() * 100.0,   // moderately large
                     };
-                    let raw = graph.raw_matrix_mut();
-                    raw[src * n + dst] = extreme as f32;
+                    // f32 floor: values below f32::MIN_POSITIVE underflow to 0.
+                    let w = extreme as f32;
+                    graph.set_edge(src, dst, w);
                     graph.renormalize();
                 }
                 check_invariants(&graph, &label)?;

@@ -147,6 +147,22 @@ pub fn write_chain(root: &Path, n: usize, cfg: &SeedConfig) -> io::Result<()> {
     Ok(())
 }
 
+/// Complete graph Kₙ — every node links to every other. nnz = n·(n−1), so
+/// storage is identical to the dense-matrix case; useful for probing the
+/// crossover point where CSR stops being a win. Cap the `n` you pass —
+/// metadata alone is `O(n²)` here.
+pub fn write_clique(root: &Path, n: usize, cfg: &SeedConfig) -> io::Result<()> {
+    assert!(n >= 2, "clique needs at least 2 nodes");
+    fs::create_dir_all(root)?;
+    let mut rng = Rng::new(cfg.seed);
+
+    for i in 0..n {
+        let links: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+        write_page(root, &mut rng, i, n, &format!("Clique {i}"), &links, cfg)?;
+    }
+    Ok(())
+}
+
 /// Barabási-Albert scale-free graph: start from a small clique of `m+1`
 /// seed nodes (fully connected), then each newly-added node attaches `m`
 /// edges to existing nodes with probability proportional to their
@@ -222,9 +238,13 @@ pub fn build(spec: &str, root: &Path) -> io::Result<()> {
             let m: usize = parse_usize(m)?;
             write_ba(root, n, m, &cfg)
         }
+        ["clique", n] => {
+            let n: usize = parse_usize(n)?;
+            write_clique(root, n, &cfg)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unknown fixture spec: {spec} (expected star-N | chain-N | ba-N-M)"),
+            format!("unknown fixture spec: {spec} (expected star-N | chain-N | ba-N-M | clique-N)"),
         )),
     }
 }

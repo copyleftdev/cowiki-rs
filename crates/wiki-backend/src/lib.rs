@@ -46,17 +46,30 @@ pub struct WikiBackend {
 impl WikiBackend {
     /// Scan a directory and build the wiki backend from scratch.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WikiError> {
+        let trace = std::env::var("COWIKI_TRACE_OPEN").is_ok();
+        let t_all = std::time::Instant::now();
         let root = root.as_ref().canonicalize()?;
+
+        let t = std::time::Instant::now();
         let pages = scan::scan_directory(&root)?;
+        if trace { eprintln!("  [open] scan_directory: {} ms ({} pages)", t.elapsed().as_millis(), pages.len()); }
         let id_to_idx = scan::build_index_map(&pages);
 
         // Read all page contents for TF-IDF (resolve relative paths through root).
+        let t = std::time::Instant::now();
         let contents: Vec<String> = pages.iter()
             .map(|p| fs::read_to_string(root.join(&p.path)).unwrap_or_default())
             .collect();
+        if trace { eprintln!("  [open] read_contents: {} ms ({} bytes)", t.elapsed().as_millis(), contents.iter().map(|c| c.len()).sum::<usize>()); }
 
+        let t = std::time::Instant::now();
         let tfidf = tfidf::build_index(&contents);
+        if trace { eprintln!("  [open] build_tfidf: {} ms", t.elapsed().as_millis()); }
+
+        let t = std::time::Instant::now();
         let g = graph::build_graph(&pages, &id_to_idx);
+        if trace { eprintln!("  [open] build_graph: {} ms", t.elapsed().as_millis()); }
+        if trace { eprintln!("  [open] TOTAL: {} ms", t_all.elapsed().as_millis()); }
 
         let n = pages.len();
         let temporal_state = SerializableTemporalState {
