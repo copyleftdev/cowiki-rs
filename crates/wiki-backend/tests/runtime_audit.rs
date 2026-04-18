@@ -430,6 +430,76 @@ fn nearest_rank(sorted: &[u64], p: usize) -> u64 {
     sorted[idx]
 }
 
+/// CI-runnable regression guard. NOT `#[ignore]`d: every `cargo test` run
+/// asserts that the core write/read/persist operations stay within
+/// committed budgets on a small BA fixture. Caught the precision-cliff
+/// bug in VOPR; this catches shape regressions at commit time.
+///
+/// Budgets are 2–3× the currently-measured values, so the test flags
+/// *meaningful* regressions without false-positiving on CI noise.
+#[test]
+fn fixtures_ci_regression() {
+    let spec = "ba-1000-4";
+    let tmp = tempfile::TempDir::new().unwrap();
+    seed_corpus::build(spec, tmp.path()).unwrap();
+
+    let t = std::time::Instant::now();
+    let mut wiki = WikiBackend::open(tmp.path()).unwrap();
+    let build_idx_ms = t.elapsed().as_millis();
+    let n = wiki.len();
+    assert_eq!(n, 1000);
+
+    // Budgets are expressed as 3× the measured values on commit fe65144,
+    // padding for CI variance. Tighten after several clean CI runs.
+    assert!(build_idx_ms < 500, "build regressed: {build_idx_ms} ms (budget 500)");
+
+    // Query latency — single query, no warmup needed at this scale.
+    let cfg = SpreadConfig { d: 0.8, max_iter: 200, epsilon: 1e-8 };
+    let t = std::time::Instant::now();
+    let r = wiki.retrieve("wiki graph retrieval", 1_000, &cfg);
+    let query_us = t.elapsed().as_micros();
+    assert!(r.converged, "did not converge");
+    assert!(query_us < 20_000, "query regressed: {query_us} µs (budget 20 000)");
+
+    // Incremental create.
+    let t = std::time::Instant::now();
+    wiki.create_page(
+        &wiki_backend::types::PageId("ci-probe".into()),
+        "probe", "Just a probe [[page-0]]."
+    ).unwrap();
+    let create_ms = t.elapsed().as_millis();
+    assert!(create_ms < 50, "create regressed: {create_ms} ms (budget 50)");
+
+    // Incremental update.
+    let upd_id = wiki.all_pages()[0].id.clone();
+    let t = std::time::Instant::now();
+    wiki.update_page(&upd_id, "# probe\n\nrefreshed.\n").unwrap();
+    let update_ms = t.elapsed().as_millis();
+    assert!(update_ms < 50, "update regressed: {update_ms} ms (budget 50)");
+
+    // Persistence round-trip.
+    let t = std::time::Instant::now();
+    wiki.save().unwrap();
+    let save_ms = t.elapsed().as_millis();
+    assert!(save_ms < 500, "save regressed: {save_ms} ms (budget 500)");
+
+    drop(wiki);
+    let t = std::time::Instant::now();
+    let reloaded = WikiBackend::open_or_rebuild(tmp.path()).unwrap();
+    let load_ms = t.elapsed().as_millis();
+    std::hint::black_box(&reloaded);
+    assert!(load_ms < 200, "load regressed: {load_ms} ms (budget 200)");
+
+    // Row-stochastic invariant still holds on the CI fixture.
+    let reloaded2 = WikiBackend::open_or_rebuild(tmp.path()).unwrap();
+    assert!(reloaded2.graph().is_row_stochastic());
+
+    eprintln!(
+        "fixtures_ci_regression OK: build={build_idx_ms} create={create_ms} \
+         update={update_ms} save={save_ms} load={load_ms} query_us={query_us}"
+    );
+}
+
 #[test]
 #[ignore]
 fn fixtures_scale() {
