@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SCOTUS Explorer · powered by cowiki</title>
+    <meta name="description" content="Explore 10,000 of the most-cited Supreme Court opinions through spreading-activation search over a citation graph." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="SCOTUS Explorer" />
+    <meta property="og:title" content="SCOTUS Explorer · powered by cowiki" />
+    <meta property="og:description" content="10,000 most-cited Supreme Court opinions, searchable via spreading activation over a citation graph." />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="SCOTUS Explorer · powered by cowiki" />
+    <meta name="twitter:description" content="10,000 most-cited Supreme Court opinions, searchable via spreading activation over a citation graph." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..500,0..1,-25..0" />
+  </head>
+  <body>
+    <script>
+      // Apply theme before React mounts, to prevent a flash of the wrong theme.
+      (function () {
+        try {
+          var saved = localStorage.getItem('scotus-explorer-theme');
+          var prefers = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          document.documentElement.dataset.theme = saved || prefers;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

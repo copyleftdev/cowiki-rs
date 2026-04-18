@@ -6,5 +6,6 @@ proof/.pytest_cache/
 .hypothesis/
 node_modules/
 ui/dist/
+ui-scotus/dist/
 wiki-corpus/
 deploy/

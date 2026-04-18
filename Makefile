@@ -1,4 +1,4 @@
-.PHONY: demo demo-stop test clean
+.PHONY: demo demo-stop explorer explorer-stop test clean
 
 demo:
 	@echo "Building Co-Wiki..."
@@ -19,6 +19,33 @@ demo:
 demo-stop:
 	@docker stop cowiki-demo 2>/dev/null || true
 	@echo "Co-Wiki stopped."
+
+explorer:
+	@echo "Building cowiki-server (release)..."
+	@cargo build --release -p cowiki-server
+	@echo "Building SCOTUS Explorer UI..."
+	@cd ui-scotus && (test -d node_modules || npm install --silent) && npx vite build
+	@pgrep -f "cowiki-server.*--port 3002" > /dev/null && kill $$(pgrep -f "cowiki-server.*--port 3002") || true
+	@sleep 1
+	@echo "Starting SCOTUS Explorer on http://localhost:3002"
+	@setsid ./target/release/cowiki-server wiki-corpus/scotus-top10k --port 3002 --ui ui-scotus/dist \
+		< /dev/null > /tmp/scotus-explorer.log 2>&1 & disown
+	@sleep 2
+	@echo ""
+	@echo "  SCOTUS Explorer: http://localhost:3002"
+	@echo "  Demo (untouched): http://localhost:3001"
+	@echo ""
+	@echo "  make explorer-stop  to shut down"
+	@echo ""
+	@which xdg-open > /dev/null 2>&1 && xdg-open http://localhost:3002 || \
+	 which open > /dev/null 2>&1 && open http://localhost:3002 || \
+	 echo "  Open http://localhost:3002 in your browser"
+
+explorer-stop:
+	@pgrep -f "cowiki-server.*--port 3002" > /dev/null \
+		&& kill $$(pgrep -f "cowiki-server.*--port 3002") \
+		&& echo "SCOTUS Explorer stopped." \
+		|| echo "SCOTUS Explorer not running."
 
 test:
 	cargo test
