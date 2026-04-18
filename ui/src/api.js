@@ -2,7 +2,13 @@ const API = '/api'
 
 const safe = (promise, fallback) => promise.catch(() => fallback)
 
-export const listPages = () => safe(fetch(`${API}/pages`).then(r => r.json()), [])
+export const listPages = ({ limit, order } = {}) => {
+  const qs = new URLSearchParams()
+  if (limit != null) qs.set('limit', String(limit))
+  if (order) qs.set('order', order)
+  const q = qs.toString()
+  return safe(fetch(`${API}/pages${q ? `?${q}` : ''}`).then(r => r.json()), [])
+}
 export const getPage = id => safe(fetch(`${API}/pages/${id}`).then(r => r.ok ? r.json() : null), null)
 export const getStats = () => safe(fetch(`${API}/stats`).then(r => r.json()), null)
 export const getPerf = () => safe(fetch(`${API}/perf`).then(r => r.json()), null)

@@ -210,9 +210,8 @@ export default function SearchTab() {
 
   // Bootstrap: derive quick-start hints from the most-linked pages in the corpus.
   useEffect(() => {
-    listPages().then(pages => {
-      const sorted = [...pages].sort((a, b) => b.link_count - a.link_count)
-      setHints(sorted.slice(0, 8).map(p => ({ id: p.id, title: p.title })))
+    listPages({ limit: 8, order: 'hubs' }).then(pages => {
+      setHints(pages.map(p => ({ id: p.id, title: p.title })))
     })
   }, [])
 

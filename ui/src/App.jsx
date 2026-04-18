@@ -88,7 +88,7 @@ export default function App() {
     setStressResult(null)
     const cs = await getCorpora()
     setCorpora(cs)
-    const [p, s, pf] = await Promise.all([listPages(), getStats(), getPerf()])
+    const [p, s, pf] = await Promise.all([listPages({ limit: 200 }), getStats(), getPerf()])
     setPages(p)
     setStats(s)
     setPerf(pf)
@@ -115,7 +115,7 @@ export default function App() {
   ]
 
   const refresh = useCallback(async () => {
-    const [p, s, pf] = await Promise.all([listPages(), getStats(), getPerf()])
+    const [p, s, pf] = await Promise.all([listPages({ limit: 200 }), getStats(), getPerf()])
     setPages(p)
     setStats(s)
     setPerf(pf)
@@ -309,6 +309,12 @@ export default function App() {
           <div className="panel-title" style={{ margin: 0 }}>All Pages</div>
           <button className="btn btn-ghost btn-sm" onClick={() => setCreateOpen(true)}>+ New</button>
         </div>
+
+        {stats && stats.page_count > pages.length && (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Showing {pages.length.toLocaleString()} of {stats.page_count.toLocaleString()} · use search to find more
+          </div>
+        )}
 
         {pages.map(p => (
           <div
