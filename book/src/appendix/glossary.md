@@ -8,18 +8,17 @@ query that produced the initial vector.
 **Authored edge** — An edge whose existence was intentionally
 declared by a human (wiki author, court's opinion, paper's
 bibliography) rather than inferred from similarity or statistical
-co-occurrence. The distinction is discussed in [Part I Chapter
-3](../part1/the-typed-graph-bet.md).
+co-occurrence. The distinction is discussed in [overview](../overview/what.md).
 
 **Budget knapsack** — The 0/1 knapsack problem used to select a
 subset of retrieved items under a total-cost cap. The cost is
-token count. See [Part II Chapter 3](../part2/budget-knap.md).
+token count. See [budget-knap](../primitives/budget-knap.md).
 
 **Cert denial** — A certiorari denial. In SCOTUS terminology, a
 one-paragraph order declining to hear a case. They accumulate
 citation counts from lower courts but have near-empty opinion
 bodies, which broke the initial top-N ranking for SCOTUS
-Explorer. See [Part IV Chapter 5](../part4/landmarks.md).
+Explorer. See [case study: landmarks](../case-study/landmarks.md).
 
 **Contraction** — A mapping \\(T : X \to X\\) whose Lipschitz
 constant is strictly less than 1. The spread iteration is a
@@ -74,7 +73,7 @@ distribution over its targets.
 **Spreading activation** — The retrieval algorithm cowiki-rs is
 built around. Origins in cognitive psychology (Collins & Loftus
 1975); reinvented multiple times in information retrieval since.
-See [Part I Chapter 1](../part1/why-spreading-activation.md).
+See [overview](../overview/what.md).
 
 **TF-IDF** — Term Frequency–Inverse Document Frequency. The term-
 weighting scheme used by `wiki-backend::tfidf` to construct the

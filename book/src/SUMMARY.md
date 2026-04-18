@@ -1,42 +1,60 @@
 # Summary
 
-[Preface](preface.md)
+[Introduction](introduction.md)
 
-# Part I — Thesis
+# Getting Started
 
-- [Why spreading activation](part1/why-spreading-activation.md)
-- [What vector search misses](part1/what-vector-search-misses.md)
-- [The typed-graph bet](part1/the-typed-graph-bet.md)
+- [Install](getting-started/install.md)
+- [Run the demos](getting-started/run-the-demos.md)
+- [Your own corpus](getting-started/your-own-corpus.md)
 
-# Part II — Primitives
+# Overview
 
-- [scored-graph](part2/scored-graph.md)
-- [spread](part2/spread.md)
-- [budget-knap](part2/budget-knap.md)
-- [temporal-graph](part2/temporal-graph.md)
-- [chunk-quality](part2/chunk-quality.md)
+- [What cowiki-rs is](overview/what.md)
+- [Architecture](overview/architecture.md)
 
-# Part III — The Glue
+# Primitives
 
-- [cowiki](part3/cowiki.md)
-- [wiki-backend](part3/wiki-backend.md)
-- [cowiki-server](part3/cowiki-server.md)
+- [scored-graph](primitives/scored-graph.md)
+- [spread](primitives/spread.md)
+- [budget-knap](primitives/budget-knap.md)
+- [temporal-graph](primitives/temporal-graph.md)
+- [chunk-quality](primitives/chunk-quality.md)
 
-# Part IV — Case Study · SCOTUS Explorer
+# Glue
 
-- [The premise and the data](part4/premise.md)
-- [Building the stub corpus](part4/stubs.md)
-- [Parallel ingest](part4/parallel-ingest.md)
-- [Enrichment](part4/enrichment.md)
-- [Curating the landmarks](part4/landmarks.md)
-- [The product UI](part4/product-ui.md)
-- [Deployment](part4/deployment.md)
+- [cowiki](glue/cowiki.md)
+- [wiki-backend](glue/wiki-backend.md)
+- [cowiki-server](glue/cowiki-server.md)
 
-# Part V — Measurements
+# HTTP API
 
-- [End-to-end](part5/end-to-end.md)
-- [Scale envelope](part5/scale-envelope.md)
-- [Where the time goes](part5/where-time-goes.md)
+- [Read endpoints](http/read.md)
+- [Write endpoints](http/write.md)
+- [SSR routes](http/ssr.md)
+
+# Operations
+
+- [Persistence (.cowiki/)](ops/persistence.md)
+- [Ingestion (cl-ingest)](ops/ingestion.md)
+- [Deployment](ops/deployment.md)
+- [Observability](ops/observability.md)
+
+# Case Study · SCOTUS Explorer
+
+- [Premise and data](case-study/premise.md)
+- [The stub corpus](case-study/stubs.md)
+- [Parallel ingest](case-study/parallel-ingest.md)
+- [Enrichment](case-study/enrichment.md)
+- [Curating landmarks](case-study/landmarks.md)
+- [Product UI](case-study/product-ui.md)
+- [Deployment](case-study/deployment.md)
+
+# Measurements
+
+- [End-to-end](measurements/end-to-end.md)
+- [Scale envelope](measurements/scale-envelope.md)
+- [Where time goes](measurements/where-time-goes.md)
 
 # Appendix
 

@@ -10,19 +10,19 @@ and tested.
 
 - **Row-stochastic adjacency** — preserved by every public
   mutator of `ScoredGraph`. Stated in
-  [Part II Chapter 1](../part2/scored-graph.md); tested in
+  [scored-graph](../primitives/scored-graph.md); tested in
   `crates/scored-graph/src/lib.rs::is_row_stochastic` + the
   gauntlet suite.
 - **Contraction and convergence** — the spread iteration has
   Lipschitz constant \\(d \cdot L < 1\\). Proved in
-  [Part II Chapter 2](../part2/spread.md); tested by
+  [spread](../primitives/spread.md); tested by
   `contraction_property` proptest.
 - **Geometric envelope** — \\(r_t \le (d \cdot L)^t \cdot r_0\\).
   Corollary of the contraction proof; tested by the runtime
   audit's envelope assertion.
 - **≥½-OPT knapsack** — modified-greedy selection is within a
   factor of 2 of the DP optimum. Proved in
-  [Part II Chapter 3](../part2/budget-knap.md); tested in the
+  [budget-knap](../primitives/budget-knap.md); tested in the
   runtime audit against `optimal_bruteforce` on 60 queries
   spanning 3 budgets.
 - **Save/reload round-trip fidelity** — bit-identical raw
