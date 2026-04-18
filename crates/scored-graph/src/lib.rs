@@ -143,12 +143,7 @@ impl ScoredGraph {
         for i in 0..n {
             let s = row_ptr[i];
             let e = row_ptr[i + 1];
-            let sum: f64 = raw_values[s..e].iter().map(|&w| w as f64).sum();
-            row_sum[i] = sum;
-            if sum > 0.0 {
-                let inv = (1.0 / sum) as EdgeWeight;
-                for k in s..e { adj_values[k] = raw_values[k] * inv; }
-            }
+            normalize_row(&raw_values[s..e], &mut adj_values[s..e], &mut row_sum[i]);
         }
 
         let (adj_t_row_ptr, adj_t_col_idx, adj_t_values) =
@@ -360,6 +355,15 @@ impl ScoredGraph {
         }
     }
 
+    /// Overwrite the per-node cost. O(1). Does not touch adjacency, so no
+    /// renormalise is required. Used by `update_page` when a doc's
+    /// token count changes.
+    pub fn set_cost(&mut self, v: usize, cost: u64) {
+        assert!(v < self.n);
+        assert!(cost > 0, "cost must be positive");
+        self.costs[v] = cost;
+    }
+
     /// Append a new node with the given cost and empty adjacency. Returns the
     /// new node's index. O(1) amortised — all CSR arrays grow by one entry
     /// (new row_ptr entries equal to previous end, empty forward + transpose
@@ -393,18 +397,18 @@ impl ScoredGraph {
 
     /// Recompute the row-stochastic adjacency from raw weights and rebuild
     /// the transpose CSR. Call after a batch of [`set_edge`] / [`scale_row`].
+    ///
+    /// Handles the f32 precision cliff that shows up under repeated decay:
+    /// if all of a row's raw values have underflowed into the subnormal
+    /// range, `1.0 / row_sum` overflows f32 and would produce `inf`
+    /// adj_values. That row is treated as dead — `row_sum[i] = 0` and
+    /// `adj_values[i..] = 0`. Spread propagates no activation through it
+    /// and `is_row_stochastic` accepts it.
     pub fn renormalize(&mut self) {
         for i in 0..self.n {
             let s = self.raw_row_ptr[i];
             let e = self.raw_row_ptr[i + 1];
-            let sum: f64 = self.raw_values[s..e].iter().map(|&w| w as f64).sum();
-            self.row_sum[i] = sum;
-            if sum > 0.0 {
-                let inv = (1.0 / sum) as EdgeWeight;
-                for k in s..e { self.adj_values[k] = self.raw_values[k] * inv; }
-            } else {
-                for k in s..e { self.adj_values[k] = 0.0; }
-            }
+            normalize_row(&self.raw_values[s..e], &mut self.adj_values[s..e], &mut self.row_sum[i]);
         }
         let (rp, ci, v) = build_transpose_from_forward(
             &self.raw_row_ptr, &self.raw_col_idx, &self.adj_values, self.n);
@@ -454,12 +458,22 @@ impl ScoredGraph {
     /// worst-case row residual grows linearly with out-degree. 1e-5 covers
     /// corpora up to ~100k while still catching structural violations.
     pub fn is_row_stochastic(&self) -> bool {
+        let debug = std::env::var("COWIKI_ROWSTOCH_DEBUG").is_ok();
         for i in 0..self.n {
             let s = self.raw_row_ptr[i];
             let e = self.raw_row_ptr[i + 1];
-            if s == e { continue; } // row has no outgoing edges
+            if s == e { continue; }
+            if self.row_sum[i] <= 0.0 { continue; }
             let sum: f64 = self.adj_values[s..e].iter().map(|&w| w as f64).sum();
-            if (sum - 1.0).abs() > 1e-5 { return false; }
+            if (sum - 1.0).abs() > 1e-5 {
+                if debug {
+                    eprintln!("ROWSTOCH FAIL row {i}: adj_sum={sum:.6} row_sum={:.3e}",
+                              self.row_sum[i]);
+                    eprintln!("  raw: {:?}", &self.raw_values[s..e]);
+                    eprintln!("  adj: {:?}", &self.adj_values[s..e]);
+                }
+                return false;
+            }
         }
         true
     }
@@ -468,6 +482,27 @@ impl ScoredGraph {
     /// or auditing. 0.0 for rows with no outgoing edges.
     #[inline]
     pub fn row_sum(&self, i: usize) -> f64 { self.row_sum[i] }
+}
+
+/// Normalise one row in place: set `adj[k] = raw[k] / sum(raw)` and
+/// write the row sum to `row_sum`. If the sum is zero, or `1.0 / sum`
+/// would overflow f32 (the row's weights have underflowed into subnormal
+/// territory after enough decay cycles), mark the row as dead:
+/// `row_sum = 0`, `adj = 0`.
+///
+/// Returning `inf` adj_values would break the row-stochastic invariant
+/// downstream (`adj · raw = inf` everywhere) and pollute SpMV outputs.
+fn normalize_row(raw: &[EdgeWeight], adj: &mut [EdgeWeight], row_sum: &mut f64) {
+    let f32_max = f32::MAX as f64;
+    let sum: f64 = raw.iter().map(|&w| w as f64).sum();
+    if sum > 0.0 && 1.0 / sum <= f32_max {
+        *row_sum = sum;
+        let inv = (1.0 / sum) as EdgeWeight;
+        for k in 0..raw.len() { adj[k] = raw[k] * inv; }
+    } else {
+        *row_sum = 0.0;
+        for slot in adj.iter_mut() { *slot = 0.0; }
+    }
 }
 
 /// Build transpose CSR from forward CSR. Given the forward layout (row = src,

@@ -307,13 +307,107 @@ impl WikiBackend {
         Ok(())
     }
 
-    /// Update an existing page's content and rebuild the index. Stays on the
-    /// full-rescan path because update may change link targets, token cost,
-    /// and TF-IDF vector in arbitrary ways — the incremental-delta design
-    /// for update is a separate piece.
+    /// Update an existing page's content incrementally. Diffs the new
+    /// content against the currently-indexed state and applies targeted
+    /// changes to the TF-IDF postings and graph edges, avoiding a full
+    /// rescan of the corpus.
+    ///
+    /// Falls back to the full-rebuild path if the page id isn't known —
+    /// the incremental path assumes a valid in-memory snapshot.
     pub fn update_page(&mut self, id: &PageId, content: &str) -> Result<(), WikiError> {
+        let trace = std::env::var("COWIKI_TRACE_UPDATE").is_ok();
+        let t0 = std::time::Instant::now();
+
         write::update_page(&self.root, id, content)?;
-        self.rebuild()
+        if trace { eprintln!("    [update] write_md: {} ms", t0.elapsed().as_millis()); }
+
+        // No in-memory entry to patch — this shouldn't happen in practice
+        // (write::update_page would have errored if the page didn't exist
+        // on disk) but be defensive: rescan rather than risk a stale index.
+        let &idx = match self.index.id_to_idx.get(&id.0) {
+            Some(i) => i,
+            None => return self.rebuild(),
+        };
+
+        // Replace the on-disk layout for parsing. The scan-pass reads the
+        // file as-is (no `# {title}` wrapper prepended), so this is what
+        // the full-rebuild path would see too.
+        let stored = std::fs::read_to_string(self.root.join(format!("{}.md", id.0)))?;
+
+        // Parse the new state.
+        let t = std::time::Instant::now();
+        let new_title = parse::extract_title(&stored)
+            .unwrap_or_else(|| id.0.clone());
+        let new_links: Vec<PageId> = parse::extract_links(&stored);
+        let new_cost = (stored.len() as u64 / 4).max(1);
+        if trace { eprintln!("    [update] parse: {} ms", t.elapsed().as_millis()); }
+
+        // Snapshot old link set before we mutate the index.
+        let old_links: Vec<PageId> = self.index.pages[idx].links_to.clone();
+
+        // Apply graph-edge delta: remove links that left, add links that arrived.
+        let t = std::time::Instant::now();
+        let old_set: std::collections::HashSet<&str> =
+            old_links.iter().map(|l| l.0.as_str()).collect();
+        let new_set: std::collections::HashSet<&str> =
+            new_links.iter().map(|l| l.0.as_str()).collect();
+        for old in &old_links {
+            if !new_set.contains(old.0.as_str()) {
+                if let Some(&target) = self.index.id_to_idx.get(&old.0) {
+                    if target != idx {
+                        self.graph.set_edge(idx, target, 0.0);
+                    }
+                }
+            }
+        }
+        for new in &new_links {
+            if !old_set.contains(new.0.as_str()) {
+                if let Some(&target) = self.index.id_to_idx.get(&new.0) {
+                    if target != idx {
+                        self.graph.set_edge(idx, target, 1.0);
+                    }
+                }
+            }
+        }
+        if trace { eprintln!("    [update] set_edges: {} ms", t.elapsed().as_millis()); }
+
+        // TF-IDF delta.
+        let t = std::time::Instant::now();
+        self.tfidf.update_document(idx, &stored);
+        if trace { eprintln!("    [update] tfidf.update_document: {} ms", t.elapsed().as_millis()); }
+
+        // Per-node cost if changed.
+        if new_cost != self.index.pages[idx].token_cost {
+            self.graph.set_cost(idx, new_cost);
+            self.index.costs[idx] = new_cost;
+        }
+
+        // Refresh the persisted PageMeta.
+        let meta = &mut self.index.pages[idx];
+        meta.title = new_title;
+        meta.links_to = new_links;
+        meta.token_cost = new_cost;
+
+        // One renormalise at the end; O(nnz).
+        let t = std::time::Instant::now();
+        self.graph.renormalize();
+        if trace {
+            eprintln!("    [update] renormalize: {} ms", t.elapsed().as_millis());
+            eprintln!("    [update] TOTAL: {} ms", t0.elapsed().as_millis());
+        }
+
+        // Defensive post-condition: if the incremental path somehow left the
+        // graph non-stochastic, fall back to a full rebuild rather than
+        // shipping a corrupted state downstream. Gated on an env var so the
+        // normal fast path doesn't pay the O(n·d) check.
+        if std::env::var("COWIKI_UPDATE_ASSERT").is_ok()
+            && !self.graph.is_row_stochastic()
+        {
+            eprintln!("    [update] row-stochastic check FAILED — falling back to rebuild");
+            return self.rebuild();
+        }
+
+        Ok(())
     }
 
     /// Persist current state to disk.

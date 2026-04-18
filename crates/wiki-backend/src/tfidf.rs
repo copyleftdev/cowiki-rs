@@ -68,6 +68,78 @@ impl TfIdfIndex {
         Self { n_docs, df, vectors, postings, norms }
     }
 
+    /// Replace an existing document's content. Computes the delta against
+    /// the currently-stored vector and applies it incrementally:
+    ///
+    /// - `df` drops by 1 for terms that left, gains 1 for terms that arrived
+    /// - The doc's sparse and posting-list entries are rewritten
+    /// - The doc's `norm` is recomputed
+    ///
+    /// Same IDF-drift policy as `add_document`: surviving docs' sparse
+    /// values stay frozen at their creation time. For full consistency
+    /// rebuild from scratch via `build_index`.
+    pub fn update_document(&mut self, idx: usize, content: &str) {
+        assert!(idx < self.n_docs, "update_document: idx out of range");
+
+        // Tokenize new content.
+        let mut tf: HashMap<String, usize> = HashMap::new();
+        let mut new_terms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for term in tokenize(content) {
+            *tf.entry(term.clone()).or_insert(0) += 1;
+            new_terms.insert(term);
+        }
+
+        // Old terms come from the existing sparse vector.
+        let old_terms: std::collections::HashSet<String> =
+            self.vectors[idx].keys().cloned().collect();
+
+        // df delta.
+        for t in new_terms.difference(&old_terms) {
+            *self.df.entry(t.clone()).or_insert(0) += 1;
+        }
+        for t in old_terms.difference(&new_terms) {
+            if let Some(c) = self.df.get_mut(t) {
+                if *c > 0 { *c -= 1; }
+                // Leave df[t]=0 keys in the map — harmless and avoids the
+                // need to clean up empty posting lists in the common case.
+            }
+        }
+
+        // Rewrite sparse vector with current df.
+        let n_docs_f = self.n_docs as f64;
+        let max_tf = tf.values().copied().max().unwrap_or(1) as f64;
+        let new_sparse: HashMap<String, f64> = tf.iter().map(|(term, &count)| {
+            let tf_norm = count as f64 / max_tf;
+            let df_val = *self.df.get(term).unwrap_or(&1) as f64;
+            let idf = (n_docs_f / df_val).ln() + 1.0;
+            (term.clone(), tf_norm * idf)
+        }).collect();
+
+        // Patch postings. For every term that changed position in this doc
+        // — whether it left, arrived, or just re-weighted — strip the old
+        // (doc_id, _) entry and re-insert if the term is still present.
+        let doc_id = idx as u32;
+        let affected: std::collections::HashSet<&String> = old_terms.iter()
+            .chain(new_terms.iter())
+            .collect();
+        for term in affected {
+            // Remove any existing entry for this doc from the posting list.
+            if let Some(list) = self.postings.get_mut(term) {
+                list.retain(|&(d, _)| d != doc_id);
+            }
+            // Re-insert if the term is still in this doc.
+            if let Some(&w) = new_sparse.get(term) {
+                self.postings
+                    .entry(term.clone())
+                    .or_default()
+                    .push((doc_id, w as f32));
+            }
+        }
+
+        self.norms[idx] = norm_from_sparse(&new_sparse);
+        self.vectors[idx] = new_sparse;
+    }
+
     /// Append a new document. Returns the new doc's index.
     ///
     /// - Tokenises `content` and updates `df`.

@@ -436,9 +436,9 @@ fn fixtures_scale() {
     use std::time::Instant;
     banner("scale-envelope");
     eprintln!(
-        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>10} {:>8}",
+        "{:<14} {:>6} {:>12} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>10} {:>8}",
         "spec", "n", "build_idx_ms", "q_p50_us", "q_p99_us", "rebuild_ms",
-        "save_ms", "load_ms", "iters", "rss_mb_Δ", "conv%"
+        "update_ms", "save_ms", "load_ms", "iters", "rss_mb_Δ", "conv%"
     );
 
     // Default ladder. Opt-in heavier rungs with AUDIT_SCALE=heavy.
@@ -490,6 +490,20 @@ fn fixtures_scale() {
         wiki.create_page(&page_id, "probe", "Just a probe [[page-0]].").unwrap();
         let rebuild_ms = t_rb.elapsed().as_millis();
 
+        // Update path: edit an existing page. Post-incremental-update this
+        // diffs old vs new content, patches only the affected postings and
+        // graph edges. Pick the lexicographically first page — fixtures
+        // use varying zero-padding widths.
+        let update_id = wiki.all_pages()[0].id.clone();
+        let second_id = wiki.all_pages().get(1).map(|p| p.id.0.as_str()).unwrap_or("");
+        let third_id  = wiki.all_pages().get(2).map(|p| p.id.0.as_str()).unwrap_or("");
+        let new_content = format!(
+            "# probe update\n\nRefreshed body with [[{second_id}]] and [[{third_id}]] references.\n"
+        );
+        let t_u = Instant::now();
+        wiki.update_page(&update_id, &new_content).unwrap();
+        let update_ms = t_u.elapsed().as_millis();
+
         // Persistence round-trip: save + reload from SQLite. This is
         // what a server restart pays.
         let t_save = Instant::now();
@@ -510,7 +524,7 @@ fn fixtures_scale() {
 
         eprintln!(
             "{spec:<14} {n:>6} {build_idx_ms:>12} {p50:>10} {p99:>10} \
-             {rebuild_ms:>10} {save_ms:>8} {load_ms:>8} \
+             {rebuild_ms:>10} {update_ms:>10} {save_ms:>8} {load_ms:>8} \
              {iters_avg:>8.1} {rss_delta:>10} {conv_pct:>7.0}%"
         );
 
